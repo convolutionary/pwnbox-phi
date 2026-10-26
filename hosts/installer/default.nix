@@ -20,14 +20,11 @@ in
     (inputs.nixpkgs + "/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix")
   ];
 
-  isoImage.storeContents = [
-    {
-      # the store path, not the flake attrset. closure-info hands this to
-      # exportReferencesGraph, and newer nix refuses anything but a path
-      object = self.outPath;
-      symlink = "/pwnbox";
-    }
-  ];
+  # the flake rides along on the iso, linked at /pwnbox for phi-install.
+  # isoImage.storeContents used to take { object; symlink; } pairs; it only
+  # takes plain paths now, and an old-style entry breaks the iso build.
+  # referencing the flake from tmpfiles pulls it into the image by itself
+  systemd.tmpfiles.rules = [ "L+ /pwnbox - - - - ${self.outPath}" ];
 
   isoImage = {
     volumeID = "PHIBOX_INST";
