@@ -43,6 +43,33 @@ jobs:
       - name: evaluate the nixos host
         run: nix eval --raw .#nixosConfigurations.nixos.config.system.build.toplevel.drvPath
 
+      # the main host is a desktop. this flips on the laptop bits phi-install
+      # can write (adaptive power, nvidia prime, usbguard) so they get
+      # evaluated too
+      - name: evaluate a laptop flavour
+        run: |
+          nix eval --raw --impure --expr '
+            let flake = builtins.getFlake (toString ./.);
+            in (flake.nixosConfigurations.nixos.extendModules {
+              modules = [ {
+                pwnbox.performance.enable = false;
+                pwnbox.phi.power.adaptive = true;
+                pwnbox.phi.hardening.usbguard = true;
+                hardware.graphics.enable = true;
+                services.xserver.videoDrivers = [ "nvidia" ];
+                hardware.nvidia = {
+                  open = true;
+                  modesetting.enable = true;
+                  prime = {
+                    offload.enable = true;
+                    offload.enableOffloadCmd = true;
+                    amdgpuBusId = "PCI:101:0:0";
+                    nvidiaBusId = "PCI:1:0:0";
+                  };
+                };
+              } ];
+            }).config.system.build.toplevel.drvPath'
+
       - name: build the installer iso
         run: nix build .#images.x86_64-linux.installer --print-build-logs
 

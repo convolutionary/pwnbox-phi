@@ -18,6 +18,7 @@ in
   imports = [
     ./mullvad.nix
     ./hardening.nix
+    ./power.nix
   ];
 
   options.pwnbox.phi = {

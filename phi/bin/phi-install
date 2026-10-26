@@ -256,12 +256,15 @@ text_system() {
 }
 
 screen_extras() {
-    local items=() perf=on nv
+    local items=() perf=on nv laptop=""
     TUI_STEP=5
     TUI_SCREEN=""
-    # performance mode turns off deep c-states. great on a desktop, eats a
-    # laptop battery, so it starts unticked when there is one
-    compgen -G "${PHI_SYS:-/sys}/class/power_supply/BAT*" >/dev/null && perf=off
+    # performance mode turns off deep c-states at boot. great on a desktop,
+    # eats a laptop battery. laptops get adaptive power instead: full speed
+    # on the charger, saving on battery
+    if compgen -G "${PHI_SYS:-/sys}/class/power_supply/BAT*" >/dev/null; then
+        perf=off laptop=1
+    fi
     items=(
         "desktop|desktop|hyprland + gnome, the full pwnbox look|on"
         "hacking|pentest toolset|26 tool categories, big download|on"
@@ -270,8 +273,9 @@ screen_extras() {
     if nv=$(gpu_nvidia_name) && [ -n "$nv" ]; then
         items+=("nvidia|nvidia driver|${nv#NVIDIA }, open modules + prime offload|on")
     fi
+    [ -n "$laptop" ] && items+=("adaptive|adaptive power|full speed on the charger, saving on battery|on")
     items+=(
-        "performance|performance mode|max clocks, no deep sleep. off on battery|$perf"
+        "performance|performance mode|always max clocks, for desktops|$perf"
         "docker|docker|starts on demand|off"
         "libvirtd|libvirt / kvm|for vms|off"
         "wireshark|wireshark|and the wireshark group|off"

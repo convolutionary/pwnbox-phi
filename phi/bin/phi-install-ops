@@ -196,7 +196,8 @@ ops_host_nix() {
 
     desktop.enable = $(has desktop);
 
-    performance.enable = $(has performance);
+    performance.enable = $([ "$(has adaptive)" = true ] && echo false || has performance);
+    phi.power.adaptive = $(has adaptive);
 
     vpn.mullvad = $(has mullvad);
 
