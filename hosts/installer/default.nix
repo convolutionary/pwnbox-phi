@@ -28,11 +28,11 @@ in
 
   isoImage = {
     volumeID = "PHIBOX_INST";
-    # renders from phi/art/make-art.py. grubTheme off, or the stock nixos
-    # theme draws over the splash
+    # uefi gets the phi grub theme (pkgs/phi/grub-theme.nix), bios keeps the
+    # syslinux splash from phi/art/make-art.py
     splashImage = ../../phi/art/splash-bios.png;
-    efiSplashImage = ../../phi/art/splash-efi.png;
-    grubTheme = null;
+    efiSplashImage = ../../phi/art/grub-efi.png;
+    grubTheme = pkgs.callPackage ../../pkgs/phi/grub-theme.nix { };
     # mkForce: the installer profiles set their own labels
     prependToMenuLabel = lib.mkForce "pwnbox-phi ";
     appendToMenuLabel = lib.mkForce " installer";
@@ -40,7 +40,17 @@ in
 
   image.baseName = lib.mkForce "pwnbox-phi-installer";
 
-  boot.zfs.forceImportRoot = false;
+  # new hardware (zen 5, rtx 50 laptops) needs a new kernel. zfs often lags
+  # behind the latest kernel and the installer never uses it, so it goes
+  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.supportedFilesystems.zfs = lib.mkForce false;
+
+  # nouveau can hang the screen on brand-new nvidia cards (a black screen
+  # right after grub on rtx 50 laptops). the installer doesn't need the
+  # nvidia card, so keep nouveau out and let the igpu or efifb drive the
+  # display. the installed system gets the real driver via phi-install
+  boot.blacklistedKernelModules = [ "nouveau" ];
+  boot.kernelParams = [ "nouveau.modeset=0" ];
 
   # networkmanager so phi-install can hand you nmtui for wifi. the minimal
   # iso uses plain wpa_supplicant, and the two fight over the card
@@ -52,7 +62,10 @@ in
   # (dejavu has the braille block) and does 256 colours
   services.kmscon = {
     enable = true;
-    hwRender = true;
+    # software rendering. gpu rendering depends on the graphics stack
+    # behaving on hardware we've never seen, and when it doesn't you get a
+    # black screen with no console at all
+    hwRender = false;
     # autologin comes from services.getty.autologinUser, which the
     # installer profile already sets to nixos. kmscon's own option is gone
     fonts = [

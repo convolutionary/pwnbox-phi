@@ -1,0 +1,84 @@
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: theme.txt
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+# pwnbox·phi grub theme. the menu lives on the left, the spiral on the
+# right (phi/art/grub-efi.png). the menu starts at the golden cut, 38.2%
+# down. selected entry: dark text on a solid gold bar, for contrast.
+# fonts are built from the repo's manrope by pkgs/phi/grub-theme.nix
+
+desktop-image: "background.png"
+desktop-color: "#0c0b09"
+title-text: ""
+
+message-color: "#d6d2c8"
+message-bg-color: "#0c0b09"
+
+terminal-font: "Manrope Regular 18"
+terminal-left: "7%"
+terminal-top: "10%"
+terminal-width: "86%"
+terminal-height: "80%"
+terminal-border: "0"
+terminal-box: "terminal_box_*.png"
+
++ label {
+  left = 7%
+  top = 21%
+  width = 36%
+  height = 56
+  align = "left"
+  color = "#ffc440"
+  font = "Manrope Bold 40"
+  text = "pwnbox·phi"
+}
+
++ label {
+  left = 7%
+  top = 21%+60
+  width = 36%
+  height = 28
+  align = "left"
+  color = "#b59a5c"
+  font = "Manrope Regular 18"
+  text = "installer   ·   1.6180339887"
+}
+
++ boot_menu {
+  left = 7%
+  top = 38%
+  width = 34%
+  height = 42%
+  item_font = "Manrope Regular 18"
+  item_color = "#e2cf9a"
+  selected_item_font = "Manrope Bold 18"
+  selected_item_color = "#0c0b09"
+  item_height = 40
+  item_spacing = 6
+  item_padding = 14
+  item_icon_space = 0
+  selected_item_pixmap_style = "select_*.png"
+  scrollbar = false
+}
+
++ progress_bar {
+  id = "__timeout__"
+  left = 7%
+  top = 82%
+  width = 34%
+  height = 3
+  fg_color = "#d4af37"
+  bg_color = "#3a3220"
+  border_color = "#3a3220"
+}
+
++ label {
+  left = 7%
+  top = 82%+14
+  width = 34%
+  height = 24
+  align = "left"
+  color = "#9c8a5a"
+  font = "Manrope Regular 16"
+  text = "arrows to choose   ·   enter to boot   ·   e to edit"
+}

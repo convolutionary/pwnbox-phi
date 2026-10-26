@@ -57,7 +57,7 @@ def mix(c1: tuple[int, ...], c2: tuple[int, ...], t: float) -> tuple[int, ...]:
     return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
 
-def render(w: int, h: int, n: int, fill: float, dim: float, phi_mark: bool) -> Image.Image:
+def render(w: int, h: int, n: int, fill: float, dim: float, phi_mark: bool, cx: float = 0.5) -> Image.Image:
     """fill = share of the image height the rectangle takes,
     dim = brightness of the art (menus get drawn on top of the splashes)"""
     ss = 3  # supersample, then shrink for smooth lines
@@ -65,7 +65,7 @@ def render(w: int, h: int, n: int, fill: float, dim: float, phi_mark: bool) -> I
     img = Image.new("RGB", (W, H), BG)
     sq, (x0, y0, x1, y1) = fib_layout(n)
     unit = H * fill / (y1 - y0)
-    ox = (W - (x1 - x0) * unit) / 2
+    ox = W * cx - (x1 - x0) * unit / 2  # cx: where the rectangle's centre sits, as a share of the width
     oy = (H - (y1 - y0) * unit) / 2
 
     def px(x: float, y: float) -> tuple[float, float]:
@@ -114,14 +114,17 @@ def main() -> int:
     out = sys.argv[1] if len(sys.argv) > 1 else HERE
     jobs = {
         # grub on uefi draws its menu over this, so it stays dim
-        "splash-efi.png": (1920, 1080, 10, 0.62, 0.45, True),
+        "splash-efi.png": (1920, 1080, 10, 0.62, 0.45, True, 0.5),
         # syslinux wants exactly 640x480
-        "splash-bios.png": (640, 480, 10, 0.62, 0.40, True),
-        "wallpaper-phi.png": (3840, 2160, 12, 0.66, 1.0, True),
+        "splash-bios.png": (640, 480, 10, 0.62, 0.40, True, 0.5),
+        # the grub theme background: spiral pushed right so the menu has the
+        # left side to itself, centred on the golden section 1 - 1/φ² ≈ 0.618+
+        "grub-efi.png": (1920, 1080, 10, 0.62, 0.85, False, 0.69),
+        "wallpaper-phi.png": (3840, 2160, 12, 0.66, 1.0, True, 0.5),
     }
     fails = []
-    for name, (w, h, n, fill, dim, mark) in jobs.items():
-        img = render(w, h, n, fill, dim, mark)
+    for name, (w, h, n, fill, dim, mark, cx) in jobs.items():
+        img = render(w, h, n, fill, dim, mark, cx)
         path = os.path.join(out, name)
         img.save(path, optimize=True)
         check = Image.open(path)
