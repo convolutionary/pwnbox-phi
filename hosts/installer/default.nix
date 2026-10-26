@@ -22,7 +22,9 @@ in
 
   isoImage.storeContents = [
     {
-      object = self;
+      # the store path, not the flake attrset. closure-info hands this to
+      # exportReferencesGraph, and newer nix refuses anything but a path
+      object = self.outPath;
       symlink = "/pwnbox";
     }
   ];
