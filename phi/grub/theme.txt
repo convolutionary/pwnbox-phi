@@ -25,7 +25,7 @@ terminal-box: "terminal_box_*.png"
 + label {
   left = 7%
   top = 21%
-  width = 36%
+  width = 31%
   height = 56
   align = "left"
   color = "#ffc440"
@@ -36,7 +36,7 @@ terminal-box: "terminal_box_*.png"
 + label {
   left = 7%
   top = 21%+60
-  width = 36%
+  width = 31%
   height = 28
   align = "left"
   color = "#b59a5c"
@@ -47,7 +47,7 @@ terminal-box: "terminal_box_*.png"
 + boot_menu {
   left = 7%
   top = 38%
-  width = 34%
+  width = 31%
   height = 42%
   item_font = "Manrope Regular 18"
   item_color = "#e2cf9a"
@@ -65,7 +65,7 @@ terminal-box: "terminal_box_*.png"
   id = "__timeout__"
   left = 7%
   top = 82%
-  width = 34%
+  width = 31%
   height = 3
   fg_color = "#d4af37"
   bg_color = "#3a3220"
@@ -75,7 +75,7 @@ terminal-box: "terminal_box_*.png"
 + label {
   left = 7%
   top = 82%+14
-  width = 34%
+  width = 31%
   height = 24
   align = "left"
   color = "#9c8a5a"
