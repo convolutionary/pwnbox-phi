@@ -35,8 +35,12 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
+      # pinned: nix 2.35 refuses the closure-info .drv nixpkgs makes for the
+      # iso ("exportReferencesGraph value is not an array or a string").
+      # try unpinning when nixpkgs or nix catches up
       - uses: cachix/install-nix-action@v31
         with:
+          install_url: https://releases.nixos.org/nix/nix-2.31.2/install
           extra_nix_config: |
             experimental-features = nix-command flakes
 
