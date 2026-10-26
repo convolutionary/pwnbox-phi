@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-install
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -uo pipefail # no -e: failures are handled per step so the screen can explain them
+
+# installs pwnbox-phi from the installer iso onto a disk.
+#
+#   sudo phi-install                     the full-screen installer
+#   phi-install --dry-run                walk through it, print commands, touch nothing
+#   phi-install --answers FILE           take answers from FILE (KEY=value lines)
+#
+# answer keys: disk mode encrypt fs host user fullname tz extras next typed
+# (see docs/setup/phi-install.md)
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PHI_MARK=${PHI_MARK:-$here/phi-mark}
+libdir=$(dirname -- "$PHI_MARK")
+# shellcheck source=phi-mark
+. "$PHI_MARK"
+# shellcheck source=phi-tui
+. "$libdir/phi-tui"
+# shellcheck source=phi-install-ops
+. "$libdir/phi-install-ops"
+# shellcheck source=phi-install-dualboot
+. "$libdir/phi-install-dualboot"
+
+flake_src=${PHI_FLAKE:-/pwnbox}
+disk="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
+free_gib=0
+
+# --- arguments --------------------------------------------------------------
+
+load_answers() {
+    local file=$1 key val
+    [ -f "$file" ] || phi_die "no answers file at $file"
+    # parsed by hand instead of sourced, so the file can't run code
+    while IFS='=' read -r key val; do
+        case "$key" in '' | \#*) continue ;; esac
+        [[ "$key" =~ ^[a-z]+$ ]] || phi_die "bad key '$key' in $file"
+        printf -v "PHI_ANS_${key^^}" '%s' "$val"
+        export "PHI_ANS_${key^^}"
+    done <"$file"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --dry-run) PHI_DRY=1 ;;
+    --answers)
+        load_answers "${2:?--answers needs a file}"
+        shift
+        ;;
+    -h | --help)
+        sed -n '/^# installs pwnbox-phi/,/^# (see docs/p' "$0" | sed -E 's/^# ?//'
+        exit 0
+        ;;
+    *) phi_die "unknown option $1 (phi-install --help)" ;;
+    esac
+    shift
+done
+export PHI_DRY
+
+TUI_STEPS=(welcome network disk layout system extras review install done)
+
+# --- checks for the input screens ------------------------------------------
+
+check_host() {
+    [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "lowercase letters, digits and dashes, up to 63"; return; }
+    case "$1" in iso | installer) echo "'$1' is taken by the iso configs, pick another" ;; esac
+}
+check_user() {
+    [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "start with a letter, then lowercase letters, digits, - or _"; return; }
+    case "$1" in root | nixos) echo "'$1' is reserved" ;; esac
+}
+check_fullname() {
+    [ -n "$1" ] || { echo "can't be empty"; return; }
+    case "$1" in *[\"\\\$\`]*) echo "no quotes, backslashes, \$ or backticks (it goes into a nix string)" ;; esac
+}
+check_tz() {
+    [[ "$1" =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || { echo "looks like Europe/Berlin or UTC"; return; }
+    [ -n "${PHI_DRY:-}" ] || [ -f "/usr/share/zoneinfo/$1" ] || [ -f "/etc/zoneinfo/$1" ] ||
+        echo "no such zone in the tz database"
+}
+
+# --- screens ----------------------------------------------------------------
+
+say() { printf '  %s\n' "$*"; }
+dim() { printf '  %s%s%s\n' "$PHI_DIM" "$*" "$PHI_RESET"; }
+
+screen_welcome() {
+    local ram
+    TUI_STEP=0
+    firmware=${PHI_FIRMWARE:-$([ -d /sys/firmware/efi ] && echo uefi || echo bios)}
+    ram=$(awk '/^MemTotal:/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)
+    tui_header
+    phi_banner "a few questions, then it gets to work"
+    phi_section "this machine"
+    say "firmware   ${PHI_GOLD}$firmware${PHI_RESET}"
+    say "memory     ${PHI_GOLD}${ram:-?}${PHI_RESET}"
+    say "flake      ${PHI_GOLD}$flake_src${PHI_RESET}"
+    local wins
+    wins=$(dual_windows_anywhere | sed 's|/dev/||' | tr '\n' ' ')
+    [ -n "$wins" ] && say "windows    ${PHI_GOLD}found on ${wins% }${PHI_RESET}  ${PHI_DIM}(you can install next to it)${PHI_RESET}"
+    [ -n "${PHI_DRY:-}" ] && say "mode       ${PHI_AMBER}dry run, nothing gets written${PHI_RESET}"
+    printf '\n'
+    [ -f "$flake_src/flake.nix" ] || phi_die "no flake.nix in $flake_src. boot the pwnbox-phi installer iso, or set PHI_FLAKE"
+    if [ -z "${PHI_DRY:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        phi_die "needs root: sudo phi-install"
+    fi
+    [ -n "$(tui_answer disk)" ] && return 0
+    tui_footer "enter start   q quit"
+    while :; do
+        case "$(tui_key)" in
+        enter) return 0 ;;
+        q) tui_quit ;;
+        esac
+    done
+}
+
+screen_network() {
+    local pick
+    TUI_STEP=1
+    [ -n "${PHI_SKIP_NET:-}" ] && return 0
+    while ! curl -fsI --max-time 6 https://cache.nixos.org >/dev/null 2>&1; do
+        TUI_SCREEN=text_network
+        tui_menu pick "no connection" \
+            "wifi|connect to wifi|opens nmtui" \
+            "retry|try again|plugged a cable in?" \
+            "skip|carry on offline|only works if everything is already cached" \
+            "quit|quit|nothing written yet"
+        case "$pick" in
+        wifi) tui_suspend; nmtui; tui_resume ;;
+        skip) return 0 ;;
+        quit) tui_quit ;;
+        esac
+    done
+}
+text_network() {
+    say "nixos-install downloads the system from cache.nixos.org, so it needs the net."
+    printf '\n'
+}
+
+screen_disk() {
+    local items=()
+    TUI_STEP=2
+    if [ -z "$(tui_answer disk)" ]; then
+        mapfile -t items < <(ops_disk_items)
+        [ "${#items[@]}" -gt 0 ] || phi_die "no disks found (the usb stick you booted from is hidden on purpose)"
+    fi
+    TUI_SCREEN=text_disk
+    tui_menu disk "where does it go?" "${items[@]}"
+    screen_mode
+}
+text_disk() {
+    say "disks with windows on them are marked. the stick you booted from isn't listed."
+    printf '\n'
+}
+
+# only asks anything when the picked disk has windows on it
+screen_mode() {
+    local ans
+    win_esp=$(dual_windows_on "$disk") || win_esp=""
+    mode=wipe
+    if [ -z "$win_esp" ]; then
+        [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside, but there's no windows on $disk"
+        return 0
+    fi
+    free_gib=$(dual_free_gib "$disk")
+    TUI_SCREEN=text_mode
+    if [ "$firmware" != "uefi" ]; then
+        [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside needs uefi, this machine booted bios"
+        tui_menu ans "windows is on this disk" \
+            "wipe|wipe the whole disk|windows and everything else goes" \
+            "back|pick another disk|" \
+            "quit|quit|nothing written yet"
+        case "$ans" in
+        back) PHI_ANS_DISK="" screen_disk ;;
+        quit) tui_quit ;;
+        esac
+        return 0
+    fi
+    while :; do
+        local side="uses the ${free_gib} GiB of free space, windows stays"
+        [ "$free_gib" -lt "$DUAL_MIN_GIB" ] && side="only ${free_gib} GiB free, needs ${DUAL_MIN_GIB}. shrink windows first"
+        tui_menu mode "windows is on this disk" \
+            "alongside|next to windows|$side" \
+            "wipe|wipe the whole disk|windows and everything else goes" \
+            "back|pick another disk|"
+        case "$mode" in
+        back)
+            mode=wipe
+            PHI_ANS_DISK="" screen_disk
+            return 0
+            ;;
+        alongside)
+            if [ "$free_gib" -lt "$DUAL_MIN_GIB" ]; then
+                [ -n "$(tui_answer mode)" ] && phi_die "only $free_gib GiB free on $disk, alongside needs $DUAL_MIN_GIB"
+                TUI_ERR="not enough free space yet. in windows: disk management → right-click C: → shrink volume"
+                continue
+            fi
+            return 0
+            ;;
+        *) return 0 ;;
+        esac
+    done
+}
+text_mode() {
+    say "windows boot manager is on ${PHI_GOLD}${win_esp#/dev/}${PHI_RESET}."
+    if [ "$firmware" != "uefi" ]; then
+        say "this machine booted in ${PHI_AMBER}bios${PHI_RESET} mode. installing next to windows needs uefi,"
+        say "because windows on bios lives on an mbr disk that can't be split safely."
+        printf '\n'
+        return
+    fi
+    say "free space on the disk: ${PHI_GOLD}${free_gib} GiB${PHI_RESET}  ${PHI_DIM}(${DUAL_MIN_GIB} minimum, ${DUAL_WANT_GIB}+ with the pentest toolset)${PHI_RESET}"
+    say "no windows partition gets touched. the boot menu lists both."
+    dual_bitlocker && say "${PHI_AMBER}bitlocker is on.${PHI_RESET} have the recovery key ready, windows may ask for it once."
+    printf '\n'
+}
+
+screen_layout() {
+    TUI_STEP=3
+    TUI_SCREEN=text_layout
+    tui_menu encrypt "encrypt the disk?" \
+        "yes|encrypt|luks2 + argon2id, passphrase at every boot" \
+        "no|don't encrypt|anyone with the disk can read it"
+    tui_menu fs "filesystem" \
+        "ext4|ext4|plain and boring, in the good way" \
+        "btrfs|btrfs|zstd compression, @ @home @nix subvolumes"
+}
+text_layout() {
+    if [ "$firmware" = "uefi" ]; then
+        say "uefi: ${PHI_GOLD}987 MiB${PHI_RESET} boot partition (fat32), the rest is root."
+    else
+        say "bios: 1 MiB grub stub, ${PHI_GOLD}987 MiB${PHI_RESET} /boot (ext4, unencrypted so grub can read it), the rest is root."
+    fi
+    printf '\n'
+}
+
+screen_system() {
+    local guess
+    TUI_STEP=4
+    TUI_SCREEN=text_system
+    guess=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    tui_input host "hostname" "${host:-phibox}" check_host
+    tui_input user "your username" "${user:-phi}" check_user
+    tui_input fullname "full name (shows up on the login screen)" "${fullname:-$user}" check_fullname
+    tui_input tz "time zone" "${tz:-${guess:-UTC}}" check_tz
+}
+text_system() {
+    dim "hostname ${host:--}   user ${user:--}   tz ${tz:--}"
+    printf '\n'
+}
+
+screen_extras() {
+    TUI_STEP=5
+    TUI_SCREEN=""
+    tui_checklist extras "what goes on it?" \
+        "desktop|desktop|hyprland + gnome, the full pwnbox look|on" \
+        "hacking|pentest toolset|26 tool categories, big download|on" \
+        "mullvad|mullvad vpn|kill switch once you log in|on" \
+        "docker|docker|starts on demand|off" \
+        "libvirtd|libvirt / kvm|for vms|off" \
+        "wireshark|wireshark|and the wireshark group|off" \
+        "creative|creative apps|media and office|off" \
+        "gaming|gaming|steam and friends|off" \
+        "usbguard|usbguard|blocks usb devices plugged in later|off" \
+        "nowebcam|no webcam|blacklists uvcvideo|off"
+}
+
+# one line per answer, with the leader dots the audit uses
+review_row() {
+    local dots=$((16 - ${#1}))
+    printf '  %s %s%s%s %s\n' "$1" "$PHI_BRONZE" "$(printf '%*s' "$dots" '' | sed 's/ /·/g')" "$PHI_RESET" "$2"
+}
+
+text_review() {
+    phi_section "disk"
+    if [ "$mode" = "alongside" ]; then
+        review_row "target" "${PHI_AMBER}$disk${PHI_RESET}  ${PHI_GREEN}(${free_gib} GiB free space, windows untouched)${PHI_RESET}"
+        review_row "boot" "uefi, systemd-boot on ${win_esp#/dev/} + new 987 MiB xbootldr"
+        review_row "boot menu" "pwnbox-phi and windows, 5 s to pick"
+        review_row "clock" "hardware clock in local time, like windows"
+    else
+        review_row "target" "${PHI_AMBER}$disk${PHI_RESET}  ${PHI_RED}(wiped)${PHI_RESET}"
+        review_row "boot" "$firmware"
+    fi
+    review_row "encryption" "$encrypt"
+    review_row "filesystem" "$fs"
+    phi_section "system"
+    review_row "hostname" "$host"
+    review_row "user" "$user ($fullname)"
+    review_row "time zone" "$tz"
+    review_row "extras" "${extras:-none}"
+    review_row "flake" "/home/$user/pwnbox, host '$host'"
+    printf '\n'
+}
+
+screen_review() {
+    local next what
+    TUI_STEP=6
+    while :; do
+        TUI_SCREEN=text_review
+        what="wipe ${disk#/dev/} and go"
+        [ "$mode" = "alongside" ] && what="into the free space on ${disk#/dev/}"
+        tui_menu next "ready?" \
+            "install|install|$what" \
+            "disk|change disk|" \
+            "layout|change encryption / filesystem|" \
+            "system|change names / time zone|" \
+            "extras|change extras|" \
+            "quit|quit|nothing written yet"
+        case "$next" in
+        install)
+            TUI_SCREEN=text_review
+            if [ "$mode" = "alongside" ]; then
+                tui_typed_confirm "${disk#/dev/}" "to install into its free space" && return 0
+            else
+                tui_typed_confirm "${disk#/dev/}" && return 0
+            fi
+            TUI_ERR="didn't match, nothing was touched"
+            ;;
+        disk) PHI_ANS_DISK="" screen_disk ;;
+        layout) PHI_ANS_ENCRYPT="" PHI_ANS_FS="" screen_layout ;;
+        system) PHI_ANS_HOST="" PHI_ANS_USER="" PHI_ANS_FULLNAME="" PHI_ANS_TZ="" screen_system ;;
+        extras) PHI_ANS_EXTRAS="" screen_extras ;;
+        quit) tui_quit ;;
+        esac
+        TUI_STEP=6
+        # answers mode can't loop forever on a bad confirm
+        [ -n "$(tui_answer next)" ] && phi_die "typed confirmation didn't match the disk"
+    done
+}
+
+# --- install ----------------------------------------------------------------
+
+phase() {
+    local label=$1
+    shift
+    if ! "$@"; then
+        printf '\n'
+        phi_warn "$label failed. the full log is at $LOG"
+        phi_warn "fix it and run phi-install again, or poke around: the target is mounted at $MNT"
+        tui_footer "enter drop to a shell   q quit"
+        [ -n "${PHI_DRY:-}" ] && exit 1
+        case "$(tui_key)" in
+        enter) tui_leave; exec bash ;;
+        *) tui_quit ;;
+        esac
+    fi
+}
+
+screen_install() {
+    TUI_STEP=7
+    TUI_SCREEN=""
+    : >"$LOG"
+    tui_header
+    phi_section "installing"
+    printf '\n'
+    if [ "$mode" = "alongside" ]; then
+        phase "partitioning" ops_partition && phi_ok "added xbootldr + root in the free space, windows untouched"
+    else
+        phase "partitioning" ops_partition && phi_ok "partitioned $disk"
+    fi
+    if [ "$encrypt" = "yes" ]; then
+        phase "encryption" ops_encrypt && phi_ok "luks2 set up and open"
+    fi
+    phase "formatting" ops_format && phi_ok "formatted ($fs)"
+    phase "mounting" ops_mount && phi_ok "mounted at $MNT"
+    phase "copying the flake" ops_copy_flake && phi_ok "flake copied to /home/$user/pwnbox"
+    phase "writing the host config" ops_write_host && phi_ok "hosts/$host written"
+    phase "nixos-install" tui_run "building and installing (this is the long one)" "$LOG" \
+        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --flake "$(ops_flake_dir)#$host"
+    phase "setting your password" ops_set_password && phi_ok "password set for $user"
+    phase "fixing ownership" ops_fix_owner
+}
+
+screen_done() {
+    local next
+    TUI_STEP=8
+    if [ -t 1 ] && [ -z "${PHI_DRY:-}" ]; then
+        phi_spiral
+        sleep 1
+    fi
+    TUI_SCREEN=text_done
+    tui_menu next "done" \
+        "reboot|reboot now|take the stick out when the screen goes dark" \
+        "stay|stay here|the new system is still mounted at $MNT"
+    if [ "$next" = "reboot" ] && [ -z "${PHI_DRY:-}" ]; then
+        ops_unmount
+        tui_leave
+        systemctl reboot
+    fi
+}
+text_done() {
+    say "pwnbox-phi is on ${PHI_AMBER}$disk${PHI_RESET}."
+    if [ "$mode" = "alongside" ]; then
+        say "windows is in the boot menu. if a windows update ever puts itself first again,"
+        say "pick ${PHI_GOLD}Linux Boot Manager${PHI_RESET} in your firmware's boot menu (often F12 or F8)."
+    fi
+    say "after the first login: ${PHI_GOLD}phi-vpn login${PHI_RESET} to arm mullvad, ${PHI_GOLD}phi-audit${PHI_RESET} to see the grade."
+    printf '\n'
+}
+
+# --- go ---------------------------------------------------------------------
+
+tui_enter
+screen_welcome
+screen_network
+screen_disk
+screen_layout
+screen_system
+screen_extras
+screen_review
+screen_install
+screen_done
+tui_leave

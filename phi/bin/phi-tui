@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-tui
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# full-screen widgets for phi-install: step header, menus, checklists,
+# text input, typed confirmation and a log-tailing runner. sourced after
+# phi-mark, never run on its own.
+#
+# every widget can be answered without a keyboard: if PHI_ANS_<NAME> is set
+# (NAME = the variable the widget fills, uppercased) it takes that value and
+# returns straight away. that's what `phi-install --answers` and the dry-run
+# tests use.
+
+[ -n "${PHI_TUI_LOADED:-}" ] && return 0
+PHI_TUI_LOADED=1
+
+TUI_STEPS=()      # step names, set by the installer
+TUI_STEP=0        # index of the current step
+TUI_SCREEN=""     # function that prints the body text above a widget
+TUI_ERR=""        # one-line error shown under the widget, cleared after use
+
+tui_lines() { tput lines 2>/dev/null || echo 24; }
+
+tui_enter() {
+    [ -t 1 ] || return 0
+    TUI_STTY=$(stty -g 2>/dev/null || true)
+    printf '\e[?1049h\e[?25l'
+    stty -echo 2>/dev/null || true
+    trap 'tui_leave; exit 130' INT TERM
+    trap tui_leave EXIT # phi_die exits from anywhere, the terminal still has to come back
+}
+
+tui_leave() {
+    [ -t 1 ] || return 0
+    [ -n "${TUI_STTY:-}" ] && stty "$TUI_STTY" 2>/dev/null
+    printf '\e[0m\e[?25h\e[?1049l'
+}
+
+# hands the real terminal back for programs that ask their own questions
+# (cryptsetup, passwd), then takes it again
+tui_suspend() { [ -t 1 ] && { stty "${TUI_STTY:-sane}" 2>/dev/null; printf '\e[?25h'; } || true; }
+tui_resume() { [ -t 1 ] && { stty -echo 2>/dev/null; printf '\e[?25l'; } || true; }
+
+# reads one key. arrows come in as escape sequences, so those get a name
+tui_key() {
+    local k rest=""
+    IFS= read -rsn1 k || return 1
+    case "$k" in
+    $'\e')
+        IFS= read -rsn2 -t 0.03 rest || true
+        case "$rest" in
+        '[A') k=up ;;
+        '[B') k=down ;;
+        '[C') k=right ;;
+        '[D') k=left ;;
+        *) k=esc ;;
+        esac
+        ;;
+    '') k=enter ;;
+    ' ') k=space ;;
+    esac
+    printf '%s' "$k"
+}
+
+tui_answer() { local n="PHI_ANS_${1^^}"; printf '%s' "${!n:-}"; }
+
+# top of every screen: wordmark, step counter, glowing rule, step dots
+tui_header() {
+    local cols i dots="" name=${TUI_STEPS[$TUI_STEP]:-} count
+    cols=$(phi_cols)
+    count="step $((TUI_STEP + 1)) of ${#TUI_STEPS[@]}"
+    printf '\e[H\e[2J\n'
+    printf '  %sφ%s %spwnbox·phi%s %sinstaller%s' "$PHI_AMBER" "$PHI_RESET" "$PHI_BOLD" "$PHI_RESET" "$PHI_DIM" "$PHI_RESET"
+    printf '\e[%dG%s%s%s\n' "$((cols - ${#count} - 1))" "$PHI_DIM" "$count" "$PHI_RESET"
+    printf '  '
+    phi_rule $((cols - 4))
+    for ((i = 0; i < ${#TUI_STEPS[@]}; i++)); do
+        if [ "$i" -lt "$TUI_STEP" ]; then
+            dots+="${PHI_GOLD}●${PHI_RESET} "
+        elif [ "$i" -eq "$TUI_STEP" ]; then
+            dots+="${PHI_AMBER}${PHI_BOLD}◉${PHI_RESET} "
+        else
+            dots+="${PHI_BRONZE}○${PHI_RESET} "
+        fi
+    done
+    printf '  %s  %s%s%s\n\n' "$dots" "$PHI_AMBER" "$name" "$PHI_RESET"
+}
+
+# header + whatever the current screen wants to say
+tui_draw_top() {
+    tui_header
+    [ -n "$TUI_SCREEN" ] && "$TUI_SCREEN"
+}
+
+tui_footer() {
+    local hint=$1
+    printf '\e[%d;1H\e[K  %s%s%s' "$(tui_lines)" "$PHI_DIM" "$hint" "$PHI_RESET"
+}
+
+tui_error_line() {
+    [ -z "$TUI_ERR" ] && return
+    printf '\n  %s✗%s %s\n' "$PHI_RED" "$PHI_RESET" "$TUI_ERR"
+    TUI_ERR=""
+}
+
+# tui_menu VAR "question" "value|label|detail" ...
+# arrow keys or j/k to move, enter to pick. VAR gets the value.
+tui_menu() {
+    local __var=$1 q=$2 ans sel=0 i key value label detail
+    shift 2
+    local items=("$@")
+    ans=$(tui_answer "$__var")
+    if [ -n "$ans" ]; then
+        printf -v "$__var" '%s' "$ans"
+        return 0
+    fi
+    while :; do
+        tui_draw_top
+        printf '  %s%s%s\n\n' "$PHI_BOLD" "$q" "$PHI_RESET"
+        for ((i = 0; i < ${#items[@]}; i++)); do
+            IFS='|' read -r value label detail <<<"${items[$i]}"
+            if [ "$i" -eq "$sel" ]; then
+                printf '  %s❯ %s%-22s%s %s%s%s\n' "$PHI_AMBER" "$PHI_BOLD" "$label" "$PHI_RESET" "$PHI_GOLD" "$detail" "$PHI_RESET"
+            else
+                printf '    %-22s %s%s%s\n' "$label" "$PHI_DIM" "$detail" "$PHI_RESET"
+            fi
+        done
+        tui_error_line
+        tui_footer "↑↓ move   enter pick   q quit"
+        key=$(tui_key) || return 1
+        case "$key" in
+        up | k) sel=$(((sel - 1 + ${#items[@]}) % ${#items[@]})) ;;
+        down | j) sel=$(((sel + 1) % ${#items[@]})) ;;
+        enter)
+            IFS='|' read -r value _ <<<"${items[$sel]}"
+            printf -v "$__var" '%s' "$value"
+            return 0
+            ;;
+        q) tui_quit ;;
+        esac
+    done
+}
+
+# tui_checklist VAR "question" "key|label|detail|on" ...
+# space toggles, enter accepts. VAR gets the ticked keys, space separated.
+tui_checklist() {
+    local __var=$1 q=$2 ans sel=0 i key k label detail on picked
+    shift 2
+    local items=("$@") state=()
+    ans=$(tui_answer "$__var")
+    if [ -n "$ans" ]; then
+        [ "$ans" = "none" ] && ans=""
+        printf -v "$__var" '%s' "$ans"
+        return 0
+    fi
+    for ((i = 0; i < ${#items[@]}; i++)); do
+        IFS='|' read -r _ _ _ on <<<"${items[$i]}"
+        state[i]=${on:-off}
+    done
+    while :; do
+        tui_draw_top
+        printf '  %s%s%s\n\n' "$PHI_BOLD" "$q" "$PHI_RESET"
+        for ((i = 0; i < ${#items[@]}; i++)); do
+            IFS='|' read -r k label detail _ <<<"${items[$i]}"
+            local box="${PHI_BRONZE}[ ]${PHI_RESET}"
+            [ "${state[i]}" = "on" ] && box="${PHI_GOLD}[${PHI_AMBER}φ${PHI_GOLD}]${PHI_RESET}"
+            if [ "$i" -eq "$sel" ]; then
+                printf '  %s❯%s %s %s%-20s%s %s%s%s\n' "$PHI_AMBER" "$PHI_RESET" "$box" "$PHI_BOLD" "$label" "$PHI_RESET" "$PHI_GOLD" "$detail" "$PHI_RESET"
+            else
+                printf '    %s %-20s %s%s%s\n' "$box" "$label" "$PHI_DIM" "$detail" "$PHI_RESET"
+            fi
+        done
+        tui_footer "↑↓ move   space toggle   enter done   q quit"
+        key=$(tui_key) || return 1
+        case "$key" in
+        up | k) sel=$(((sel - 1 + ${#items[@]}) % ${#items[@]})) ;;
+        down | j) sel=$(((sel + 1) % ${#items[@]})) ;;
+        space) [ "${state[sel]}" = "on" ] && state[sel]=off || state[sel]=on ;;
+        enter)
+            picked=""
+            for ((i = 0; i < ${#items[@]}; i++)); do
+                IFS='|' read -r k _ <<<"${items[$i]}"
+                [ "${state[i]}" = "on" ] && picked+="$k "
+            done
+            printf -v "$__var" '%s' "${picked% }"
+            return 0
+            ;;
+        q) tui_quit ;;
+        esac
+    done
+}
+
+# tui_input VAR "label" "default" [checker]
+# checker gets the value and prints a complaint if it's wrong
+tui_input() {
+    local __var=$1 label=$2 def=${3:-} check=${4:-} val complaint
+    val=$(tui_answer "$__var")
+    if [ -n "$val" ]; then
+        if [ -n "$check" ] && complaint=$("$check" "$val") && [ -n "$complaint" ]; then
+            phi_die "answer for $__var rejected: $complaint"
+        fi
+        printf -v "$__var" '%s' "$val"
+        return 0
+    fi
+    while :; do
+        tui_draw_top
+        printf '  %s%s%s\n' "$PHI_BOLD" "$label" "$PHI_RESET"
+        tui_error_line
+        printf '\n\e[s'
+        tui_footer "enter accept   ctrl-c quit"
+        printf '\e[u'
+        tui_suspend
+        IFS= read -r -e -i "$def" -p "  ${PHI_AMBER}❯${PHI_RESET} " val || return 1
+        tui_resume
+        if [ -n "$check" ]; then
+            complaint=$("$check" "$val")
+            if [ -n "$complaint" ]; then
+                TUI_ERR=$complaint
+                def=$val
+                continue
+            fi
+        fi
+        printf -v "$__var" '%s' "$val"
+        return 0
+    done
+}
+
+# makes you type a word before anything destructive happens
+tui_typed_confirm() {
+    local want=$1 got typed=""
+    local action=${2:-to wipe it and install}
+    tui_input typed "type ${PHI_AMBER}${want}${PHI_RESET}${PHI_BOLD} $action, anything else goes back" ""
+    got=$typed
+    [ "$got" = "$want" ]
+}
+
+tui_quit() {
+    tui_leave
+    printf '\n  %sφ%s nothing was written. run %sphi-install%s when you want another go.\n\n' \
+        "$PHI_GOLD" "$PHI_RESET" "$PHI_AMBER" "$PHI_RESET"
+    exit 0
+}
+
+# tui_run "label" logfile cmd...
+# runs cmd with output going to the log, and redraws a status block with a
+# spinner, elapsed time and the last few log lines until it's done
+tui_run() {
+    local label=$1 log=$2 pid rc start now el i=0 cols tailn=6
+    shift 2
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    if [ -n "${PHI_DRY:-}" ]; then
+        printf '  %s$%s %s\n' "$PHI_BRONZE" "$PHI_RESET" "$*" | tee -a "$log"
+        return 0
+    fi
+    "$@" >>"$log" 2>&1 &
+    pid=$!
+    start=$(date +%s)
+    cols=$(phi_cols)
+    while kill -0 "$pid" 2>/dev/null; do
+        now=$(date +%s)
+        el=$((now - start))
+        printf '\e[s\e[J'
+        printf '  %s%s%s %s  %s%02d:%02d%s\n\n' "$PHI_AMBER" "${frames[i % 10]}" "$PHI_RESET" "$label" \
+            "$PHI_DIM" $((el / 60)) $((el % 60)) "$PHI_RESET"
+        tail -n "$tailn" "$log" 2>/dev/null | cut -c1-$((cols - 8)) |
+            sed "s/^/    ${PHI_BRONZE}│${PHI_RESET} ${PHI_DIM}/; s/\$/${PHI_RESET}/"
+        printf '\e[u'
+        i=$((i + 1))
+        sleep 0.1
+    done
+    wait "$pid"
+    rc=$?
+    printf '\e[J'
+    if [ "$rc" -eq 0 ]; then
+        phi_ok "$label"
+    else
+        printf '  %s✗%s %s %s(exit %d, log: %s)%s\n' "$PHI_RED" "$PHI_RESET" "$label" "$PHI_DIM" "$rc" "$log" "$PHI_RESET"
+    fi
+    return "$rc"
+}

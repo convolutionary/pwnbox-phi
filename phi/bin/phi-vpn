@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-vpn
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -euo pipefail
+
+# wrapper around the mullvad cli. `harden` applies the settings from the
+# nixos module, `check` tests where traffic actually exits.
+# written against mullvad-cli 2025.9.
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=phi-mark
+. "${PHI_MARK:-$here/phi-mark}"
+
+# phi-mullvad-tune.service sets these from the pwnbox.phi.vpn options
+relay="${PHI_VPN_RELAY:-}"            # e.g. "se" or "se got"
+lockdown="${PHI_VPN_LOCKDOWN:-on}"    # kill switch
+multihop="${PHI_VPN_MULTIHOP:-off}"
+daita="${PHI_VPN_DAITA:-on}"          # pads traffic, costs some bandwidth
+quantum="${PHI_VPN_QUANTUM:-on}"
+dns_blocks="${PHI_VPN_DNS_BLOCKS:---block-ads --block-trackers --block-malware}"
+
+command -v mullvad >/dev/null || phi_die "mullvad isn't installed. set pwnbox.vpn.mullvad = true and rebuild"
+
+charon_logged_in() {
+    # `account get` exits 0 even when logged out, so read what it says
+    local said
+    said=$(mullvad account get 2>&1 || true)
+    grep -q '^Mullvad account:' <<<"$said" && ! grep -qi 'revoked' <<<"$said"
+}
+
+charon_state() {
+    mullvad status -j 2>/dev/null | jq -r '.state // "unknown"'
+}
+
+# applies one setting. if this mullvad version doesn't have it, warn and move on
+charon_try() {
+    local label=$1
+    shift
+    if mullvad "$@" >/dev/null 2>&1; then
+        phi_ok "$label"
+    else
+        phi_warn "$label — mullvad said no (old cli?), skipping"
+    fi
+}
+
+charon_harden() {
+    phi_say "applying phi defaults"
+    charon_try "auto-connect on" auto-connect set on
+    charon_try "lan sharing blocked" lan set block
+    # shellcheck disable=SC2086 # dns_blocks is meant to word-split into flags
+    charon_try "dns blocklists: ${dns_blocks//--block-/}" dns set default $dns_blocks
+    charon_try "quantum-resistant tunnel $quantum" tunnel set wireguard --quantum-resistant "$quantum"
+    charon_try "daita $daita" tunnel set wireguard --daita "$daita"
+    charon_try "multihop $multihop" relay set tunnel wireguard --use-multihop "$multihop"
+    if [ -n "$relay" ]; then
+        # shellcheck disable=SC2086 # "se got" -> two args on purpose
+        charon_try "relay pinned to $relay" relay set location $relay
+    fi
+
+    # lockdown with no account blocks everything, including the traffic you'd
+    # need to log in. wait until there's an account.
+    if [ "$lockdown" = "on" ]; then
+        if charon_logged_in; then
+            charon_try "lockdown (kill switch) on" lockdown-mode set on
+        else
+            phi_warn "not logged in, holding off on lockdown so you can still reach the net"
+            phi_warn "run: phi-vpn login   then: phi-vpn harden"
+        fi
+    else
+        charon_try "lockdown off" lockdown-mode set off
+    fi
+}
+
+# asks am.i.mullvad.net where our traffic comes out. curl uses the real
+# route, so this catches cases where `mullvad status` looks fine.
+kiroshi_exit_check() {
+    local raw
+    raw=$(curl -fsS --max-time 8 https://am.i.mullvad.net/json 2>/dev/null) || {
+        phi_warn "couldn't reach am.i.mullvad.net (offline or lockdown doing its job)"
+        return 2
+    }
+    local ip country exit host
+    ip=$(jq -r '.ip' <<<"$raw")
+    country=$(jq -r '.country // "?"' <<<"$raw")
+    exit=$(jq -r '.mullvad_exit_ip' <<<"$raw")
+    host=$(jq -r '.mullvad_exit_ip_hostname // empty' <<<"$raw")
+    if [ "$exit" = "true" ]; then
+        phi_ok "exit $ip ($country) via ${host:-mullvad}"
+        return 0
+    fi
+    phi_warn "exit $ip ($country) is NOT mullvad. you're naked out there"
+    return 1
+}
+
+# mullvad's in-tunnel resolvers are 10.64.0.1 and 100.64.0.0/10. any other
+# dns server while connected means queries are leaking.
+kiroshi_dns_check() {
+    local servers
+    servers=$(resolvectl dns 2>/dev/null | awk -F': ' 'NF > 1 { print $2 }' | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+    if [ -z "$servers" ]; then
+        phi_warn "resolvectl had nothing to say about dns"
+        return 2
+    fi
+    local leak=0 s
+    while read -r s; do
+        case "$s" in
+        10.64.0.1 | 100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].* | fc00:bbbb:bbbb:bb01::*) ;;
+        *) leak=1 ;;
+        esac
+    done <<<"$servers"
+    if [ "$leak" -eq 0 ]; then
+        phi_ok "dns stays in the tunnel ($(tr '\n' ' ' <<<"$servers"))"
+        return 0
+    fi
+    phi_warn "dns servers outside mullvad: $(tr '\n' ' ' <<<"$servers")"
+    return 1
+}
+
+atlas_status() {
+    local json state where lock
+    json=$(mullvad status -j 2>/dev/null || echo '{}')
+    state=$(jq -r '.state // "unknown"' <<<"$json")
+    where=$(jq -r '[.details.location.hostname, .details.location.city, .details.location.country] | map(select(. != null)) | join(", ")' <<<"$json" 2>/dev/null || true)
+    lock=$(mullvad lockdown-mode get 2>/dev/null | awk -F': ' '{ print $2 }')
+
+    local acct dot_t dot_l dot_a
+    acct=$(charon_logged_in && echo linked || echo "not logged in")
+    case "$state" in
+    connected) dot_t=$PHI_GREEN state="connected · ${where:-somewhere}" ;;
+    connecting) dot_t=$PHI_AMBER state="connecting…" ;;
+    *) dot_t=$PHI_RED ;;
+    esac
+    [ "$lock" = "on" ] && dot_l=$PHI_GREEN || dot_l=$PHI_RED
+    [ "$acct" = "linked" ] && dot_a=$PHI_GREEN || dot_a=$PHI_AMBER
+
+    phi_section "mullvad"
+    printf '  %s●%s tunnel    %s\n' "$dot_t" "$PHI_RESET" "$state"
+    printf '  %s●%s lockdown  %s\n' "$dot_l" "$PHI_RESET" "${lock:-?}"
+    printf '  %s●%s account   %s\n\n' "$dot_a" "$PHI_RESET" "$acct"
+}
+
+hermes_wait_connected() {
+    local i
+    for ((i = 0; i < 40; i++)); do
+        [ "$(charon_state)" = "connected" ] && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+cmd=${1:-status}
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+status) atlas_status ;;
+up | connect)
+    if [ "$#" -gt 0 ]; then
+        mullvad relay set location "$@" >/dev/null || phi_die "mullvad didn't like location '$*' (try: phi-vpn relays)"
+    fi
+    mullvad connect >/dev/null
+    phi_spin "threading the tunnel" hermes_wait_connected || phi_die "still not connected after 20s — check 'mullvad status'"
+    atlas_status
+    kiroshi_exit_check || true
+    ;;
+down | disconnect)
+    mullvad disconnect >/dev/null
+    if mullvad lockdown-mode get 2>/dev/null | grep -q ': on'; then
+        phi_warn "tunnel down. lockdown is on, so you're offline until 'phi-vpn up'"
+    else
+        phi_warn "tunnel down, traffic now goes out in the clear"
+    fi
+    ;;
+hop)
+    # pick a random country from the relay list
+    pick=$(mullvad relay list 2>/dev/null | sed -n 's/^[^[:space:]].*(\([a-z][a-z]\))$/\1/p' | shuf -n1)
+    [ -n "$pick" ] || phi_die "couldn't read the relay list"
+    phi_say "hopping to $pick"
+    "$0" up "$pick"
+    ;;
+check)
+    rc=0
+    [ "$(charon_state)" = "connected" ] && phi_ok "daemon says connected" || {
+        phi_warn "daemon says $(charon_state)"
+        rc=1
+    }
+    kiroshi_exit_check || rc=1
+    kiroshi_dns_check || rc=1
+    exit "$rc"
+    ;;
+harden) charon_harden ;;
+lockdown)
+    case "${1:-}" in
+    on | off) mullvad lockdown-mode set "$1" >/dev/null && phi_ok "lockdown $1" ;;
+    *) mullvad lockdown-mode get ;;
+    esac
+    ;;
+login)
+    # mullvad prompts for the number itself, so it stays out of argv and history
+    mullvad account login
+    phi_ok "logged in. arming the defaults now"
+    charon_harden
+    ;;
+relays) mullvad relay list | grep -E '^[^[:space:]]' ;;
+-h | --help | help)
+    phi_banner "phi-vpn · mullvad wrangler"
+    cat <<EOF
+    status            tunnel, lockdown and account at a glance (default)
+    up [cc [city]]    connect, optionally pinning a location (e.g. up se got)
+    down              disconnect (with lockdown on, that means offline)
+    hop               jump to a random country
+    check             exit ip + dns leak test against am.i.mullvad.net
+    harden            apply the phi defaults (lockdown, pq, daita, dns blocks)
+    lockdown [on|off] flip the kill switch
+    login             log into your account, then harden
+    relays            list countries
+
+EOF
+    ;;
+*) phi_die "unknown command '$cmd' (phi-vpn help)" ;;
+esac

@@ -1,0 +1,12 @@
+result
+result-*
+/iso/
+.direnv
+*.swp
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+
+# local previews of the installer screens and art, not part of the repo
+/preview/

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-panic
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -uo pipefail # no -e: if one step fails, still do the rest
+
+# turns on mullvad lockdown, cuts the network, clears the clipboard and
+# locks the screen. bound to SUPER+SHIFT+ESC in hyprland.
+#
+#   phi-panic         do all of the above
+#   phi-panic undo    turn networking back on and reconnect mullvad
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=phi-mark
+. "${PHI_MARK:-$here/phi-mark}"
+
+nemesis_notify() {
+    command -v notify-send >/dev/null && notify-send -u critical -a phi-panic "φ $1" "$2" || true
+}
+
+# lockdown goes first so nothing gets out while the other steps run
+flatline() {
+    if command -v mullvad >/dev/null; then
+        mullvad lockdown-mode set on >/dev/null 2>&1 && phi_ok "mullvad lockdown armed"
+    fi
+    if command -v nmcli >/dev/null; then
+        nmcli networking off >/dev/null 2>&1 && phi_ok "networking off" || phi_warn "nmcli refused, network may still be up"
+    fi
+    if command -v rfkill >/dev/null; then
+        rfkill block wlan bluetooth >/dev/null 2>&1 && phi_ok "radios blocked"
+    fi
+
+    # the clipboard tends to have passwords and hashes in it
+    command -v wl-copy >/dev/null && wl-copy --clear 2>/dev/null && phi_ok "clipboard cleared"
+    command -v cliphist >/dev/null && cliphist wipe 2>/dev/null && phi_ok "clipboard history wiped"
+
+    nemesis_notify "panic" "network cut, kill switch armed. 'phi-panic undo' to return"
+
+    if command -v hyprlock >/dev/null && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+        pidof hyprlock >/dev/null || hyprlock &
+        disown 2>/dev/null || true
+    else
+        loginctl lock-session 2>/dev/null || true
+    fi
+    phi_ok "screen locked"
+}
+
+# lockdown stays on, so nothing leaves the box until mullvad reconnects
+lazarus() {
+    command -v rfkill >/dev/null && rfkill unblock wlan >/dev/null 2>&1
+    command -v nmcli >/dev/null && nmcli networking on >/dev/null 2>&1 && phi_ok "networking back"
+    if command -v mullvad >/dev/null; then
+        mullvad connect >/dev/null 2>&1 && phi_ok "mullvad reconnecting (lockdown still on)"
+    fi
+    phi_say "bluetooth stays blocked. 'rfkill unblock bluetooth' if you need it"
+}
+
+case "${1:-now}" in
+now | go) flatline ;;
+undo | restore) lazarus ;;
+-h | --help | help)
+    phi_banner "phi-panic · panic button"
+    printf '    phi-panic        cut network, arm kill switch, clear clipboard, lock\n'
+    printf '    phi-panic undo   turn networking back on, reconnect mullvad\n\n'
+    ;;
+*) phi_die "unknown: $1 (phi-panic help)" ;;
+esac

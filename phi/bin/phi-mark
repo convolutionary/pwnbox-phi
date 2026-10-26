@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-mark
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# colours, banner and message helpers shared by the phi-* tools. meant to
+# be sourced; running it directly just prints the banner.
+#
+#   . "${PHI_MARK:-$(dirname "$0")/phi-mark}"
+#
+# the drawing itself (golden rectangle + spiral in braille) lives in
+# phi-golden.awk next to this file.
+
+[ -n "${PHI_MARK_LOADED:-}" ] && return 0 2>/dev/null
+PHI_MARK_LOADED=1
+
+PHI="1.6180339887498948482"
+PHI_INV="0.6180339887498948482" # 1/φ = φ - 1
+PHI_DIGITS="16180339887498948482045868343656381177203091798057628621354486227"
+PHI_GOLDEN_AWK="$(dirname -- "${PHI_MARK:-${BASH_SOURCE[0]}}")/phi-golden.awk"
+
+# PHI_TC: 1 = truecolor, 0 = 256 colours, -1 = no colour at all.
+# colour only when stdout is a terminal and NO_COLOR isn't set.
+# PHI_FORCE_COLOR=1 overrides that, for piping into less -R or screenshots
+if [ -n "${PHI_FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; }; then
+    case "${COLORTERM:-}" in
+    truecolor | 24bit) PHI_TC=1 ;;
+    *) PHI_TC=0 ;;
+    esac
+else
+    PHI_TC=-1
+fi
+
+# rgb -> escape. on 256-colour terminals it snaps to the 6x6x6 cube
+phi_rgb() {
+    if [ "$PHI_TC" -lt 0 ]; then return; fi
+    if [ "$PHI_TC" -eq 1 ]; then
+        printf '\e[38;2;%d;%d;%dm' "$1" "$2" "$3"
+    else
+        printf '\e[38;5;%dm' $((16 + 36 * (($1 * 5 + 127) / 255) + 6 * (($2 * 5 + 127) / 255) + ($3 * 5 + 127) / 255))
+    fi
+}
+
+if [ "$PHI_TC" -ge 0 ]; then
+    PHI_GOLD=$(phi_rgb 212 175 55)
+    PHI_AMBER=$(phi_rgb 255 196 64)
+    PHI_BRONZE=$(phi_rgb 104 86 46)
+    PHI_RED=$(phi_rgb 230 92 80)
+    PHI_GREEN=$(phi_rgb 134 204 120)
+    PHI_DIM=$'\e[2m'
+    PHI_BOLD=$'\e[1m'
+    PHI_ITAL=$'\e[3m'
+    PHI_RESET=$'\e[0m'
+else
+    PHI_GOLD="" PHI_AMBER="" PHI_BRONZE="" PHI_RED="" PHI_GREEN=""
+    PHI_DIM="" PHI_BOLD="" PHI_ITAL="" PHI_RESET=""
+fi
+
+phi_quips=(
+    "irrational, but in a good way"
+    "1.618 parts genius, 0.618 parts caffeine"
+    "φ² = φ + 1. go on, check it"
+    "approved by fibonacci, not by your auditor"
+    "the most irrational box on the subnet"
+    "logs live in ram here, so nobody saw this joke"
+    "run phi-audit if you want to be graded"
+)
+
+phi_quip() {
+    printf '%s\n' "${phi_quips[RANDOM % ${#phi_quips[@]}]}"
+}
+
+phi_cols() { tput cols 2>/dev/null || echo 80; }
+
+# horizontal rule that's dark at the ends and brightest where φ sits
+phi_rule() {
+    local width=${1:-55}
+    awk -v w="$width" -v tc="$PHI_TC" 'BEGIN {
+        cut = int(w / 1.6180339887)
+        for (i = 0; i < w; i++) {
+            ch = (i == cut) ? "φ" : "─"
+            if (tc < 0) { printf "%s", ch; continue }
+            d = (i < cut) ? (cut - i) / cut : (i - cut) / (w - cut)
+            t = (1 - d) ^ 2   # falls off fast, so the glow stays near φ
+            r = 70 + t * 185; g = 58 + t * 138; b = 34 + t * 30
+            if (i == cut) { r = 255; g = 214; b = 102 }
+            if (tc == 1) printf "\033[38;2;%d;%d;%dm%s", r, g, b, ch
+            else printf "\033[38;5;%dm%s", (t > 0.66 ? 220 : t > 0.33 ? 136 : 58), ch
+        }
+        printf (tc < 0 ? "\n" : "\033[0m\n")
+    }'
+}
+
+phi_banner() {
+    local tagline=${1:-$(phi_quip)} txt
+    txt="${PHI_BOLD}${PHI_AMBER}p w n b o x  ·  φ${PHI_RESET}
+${PHI_BRONZE}──────────────────────
+${PHI_GOLD}φ = ${PHI_DIGITS:0:1}.${PHI_DIGITS:1:15}…
+${PHI_RESET}
+${PHI_DIM}${PHI_ITAL}${tagline}"
+
+    printf '\n'
+    # no braille on the plain linux console (or no awk file next to us):
+    # same words, with the rule standing in for the picture
+    if [ ! -f "$PHI_GOLDEN_AWK" ] || [ "${TERM:-}" = linux ] || [ -n "${PHI_NO_BRAILLE:-}" ]; then
+        printf '%s%s\n' "$txt" "$PHI_RESET" | sed 's/^/  /'
+        printf '  '
+        phi_rule 34
+        printf '\n'
+        return
+    fi
+    if [ "$(phi_cols)" -ge 66 ]; then
+        LC_ALL=C awk -v n=6 -v k=4 -v tc="$PHI_TC" -v mode=static -v trow=2 -v txt="$txt" \
+            -f "$PHI_GOLDEN_AWK" | sed 's/^/  /'
+    else
+        # narrow terminal: picture first, words underneath
+        LC_ALL=C awk -v n=6 -v k=4 -v tc="$PHI_TC" -v mode=static -f "$PHI_GOLDEN_AWK" | sed 's/^/  /'
+        printf '\n%s%s\n' "$txt" "$PHI_RESET" | sed 's/^/  /'
+    fi
+    printf '%s\n' "$PHI_RESET"
+}
+
+# message helpers, so every phi-* tool prints the same way
+phi_say() { printf '  %sφ%s %s\n' "$PHI_GOLD" "$PHI_RESET" "$*"; }
+phi_ok() { printf '  %s✓%s %s\n' "$PHI_GREEN" "$PHI_RESET" "$*"; }
+phi_warn() { printf '  %s!%s %s\n' "$PHI_AMBER" "$PHI_RESET" "$*" >&2; }
+phi_die() {
+    printf '  %s✗%s %s\n' "$PHI_RED" "$PHI_RESET" "$*" >&2
+    exit 1
+}
+
+# "  ◆ kernel ─────────────" with the line trailing off to the rule width
+phi_section() {
+    local title=$1 width=${2:-55} fill
+    fill=$((width - ${#title} - 5))
+    [ "$fill" -lt 3 ] && fill=3
+    printf '\n  %s◆%s %s%s%s %s%s%s\n' "$PHI_AMBER" "$PHI_RESET" "$PHI_BOLD" "$title" "$PHI_RESET" \
+        "$PHI_BRONZE" "$(printf '%*s' "$fill" '' | sed 's/ /─/g')" "$PHI_RESET"
+}
+
+# progress bar in eighth-blocks, dark gold to bright left to right, with a
+# tick at 1/φ of the width so you can see which side of the cut you're on
+phi_bar() {
+    local have=$1 total=$2 width=${3:-34}
+    [ "$total" -gt 0 ] || total=1
+    awk -v have="$have" -v total="$total" -v w="$width" -v tc="$PHI_TC" 'BEGIN {
+        split("▏ ▎ ▍ ▌ ▋ ▊ ▉", part, " ")
+        exact = have / total * w
+        full = int(exact); frac = int((exact - full) * 8)
+        notch = int(w * 0.6180339887)
+        for (i = 0; i < w; i++) {
+            t = w > 1 ? i / (w - 1) : 1
+            if (tc == 1) on = sprintf("\033[38;2;%d;%d;%dm", 150 + t * 105, 112 + t * 92, 20 + t * 60)
+            else if (tc == 0) on = (t < 0.5 ? "\033[38;5;136m" : "\033[38;5;220m")
+            else on = ""
+            off = tc < 0 ? "" : (tc == 1 ? "\033[38;2;64;54;34m" : "\033[38;5;58m")
+            tick = tc < 0 ? "" : (tc == 1 ? "\033[38;2;255;196;64m" : "\033[38;5;214m")
+            if (i < full) printf "%s█", on
+            else if (i == full && frac > 0) printf "%s%s", on, part[frac]
+            else if (i == notch) printf "%s┊", tick
+            else printf "%s─", off
+        }
+        if (tc >= 0) printf "\033[0m"
+    }'
+}
+
+# spinner for anything slow. a braille dot circles while φ's digits scroll
+# past, newest digit brightest.
+# usage: phi_spin "talking to mullvad" some command --args
+phi_spin() {
+    local msg=$1
+    shift
+    if [ ! -t 1 ]; then
+        "$@"
+        return
+    fi
+    "$@" >/dev/null 2>&1 &
+    local pid=$! i=0 frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) win
+    printf '\e[?25l'
+    while kill -0 "$pid" 2>/dev/null; do
+        win=${PHI_DIGITS:i % (${#PHI_DIGITS} - 10):10}
+        printf '\r  %s%s%s %s  %s%s%s%s%s%s ' \
+            "$PHI_AMBER" "${frames[i % 10]}" "$PHI_RESET" "$msg" \
+            "$PHI_BRONZE" "${win:0:6}" "$PHI_GOLD" "${win:6:3}" "$PHI_AMBER$PHI_BOLD" "${win:9:1}$PHI_RESET"
+        i=$((i + 1))
+        sleep 0.07
+    done
+    printf '\r\e[K\e[?25h'
+    wait "$pid"
+}
+
+# builds the golden rectangle square by square, then traces the spiral,
+# then types φ out underneath. awk does the geometry, bash just paces it.
+phi_spiral() {
+    if [ ! -t 1 ] || [ ! -f "$PHI_GOLDEN_AWK" ] || [ "${TERM:-}" = linux ] || [ -n "${PHI_NO_BRAILLE:-}" ]; then
+        phi_banner
+        return
+    fi
+    local cols rows n k size w h top left line
+    cols=$(phi_cols)
+    rows=$(tput lines 2>/dev/null || echo 24)
+
+    # biggest picture that still leaves room for the caption
+    # k=4 only: 4 dots per fibonacci unit puts every square edge exactly on a
+    # braille cell boundary, so the boxes line up. k=2 leaves some edges
+    # mid-cell and the inner squares look shifted
+    for size in "9 4" "8 4" "7 4" "6 4"; do
+        set -- $size
+        read -r w h < <(LC_ALL=C awk -v n="$1" -v k="$2" -v mode=size -f "$PHI_GOLDEN_AWK")
+        if [ "$w" -le $((cols - 2)) ] && [ "$h" -le $((rows - 5)) ]; then
+            n=$1 k=$2
+            break
+        fi
+    done
+    [ -n "${n:-}" ] || {
+        phi_banner
+        return
+    }
+
+    top=$(((rows - h - 3) / 2 + 1))
+    left=$(((cols - w) / 2 + 1))
+    printf '\e[?25l\e[2J'
+    trap 'printf "\e[0m\e[?25h\n"; exit 130' INT # ctrl-c shouldn't eat your cursor
+
+    while IFS= read -r line; do
+        if [ "$line" = "@" ]; then
+            sleep 0.014
+        else
+            printf '%s' "$line"
+        fi
+    done < <(LC_ALL=C awk -v n="$n" -v k="$k" -v tc="$PHI_TC" -v mode=anim \
+        -v orow="$top" -v ocol="$left" -v batch=5 -f "$PHI_GOLDEN_AWK")
+
+    # φ types itself out under the picture
+    local digits="φ = 1.${PHI_DIGITS:1:40}…" i
+    printf '\e[%d;%dH%s' "$((top + h + 1))" "$(((cols - ${#digits}) / 2 + 1))" "$PHI_AMBER"
+    for ((i = 0; i < ${#digits}; i++)); do
+        printf '%s' "${digits:i:1}"
+        sleep 0.018
+    done
+    local q
+    q=$(phi_quip)
+    printf '\e[%d;%dH%s%s%s%s' "$((top + h + 2))" "$(((cols - ${#q}) / 2 + 1))" "$PHI_DIM" "$PHI_ITAL" "$q" "$PHI_RESET"
+    printf '\e[%d;1H\e[?25h\n' "$((top + h + 3))"
+    trap - INT
+}
+
+# if someone runs the lib directly, at least say hi
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    phi_banner
+    phi_rule
+fi

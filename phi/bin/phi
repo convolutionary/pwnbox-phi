@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -euo pipefail
+
+# entry point for the phi toolkit: banner, spiral, digits of φ, and
+# `phi stamp`, which puts the φ header on scripts.
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=phi-mark
+. "${PHI_MARK:-$here/phi-mark}"
+
+phi_usage() {
+    phi_banner "pwnbox·phi toolkit"
+    cat <<EOF
+  ${PHI_BOLD}usage${PHI_RESET}  phi [command]
+
+    banner          the logo + a random quip (default)
+    spiral          draw a golden spiral, one dot at a time
+    digits [n]      stream n digits of φ (default 61)
+    stamp FILE...   mark scripts with the φ header (idempotent)
+    selftest        test digits, the rule and the stamp
+
+  ${PHI_BOLD}friends${PHI_RESET}
+    phi-vpn         mullvad cli wrapper with phi defaults
+    phi-audit       check and grade the hardening
+    phi-panic       kill switch, network off, screen lock
+
+EOF
+}
+
+# (1 + √5) / 2 to n places, via bc
+kurisu_digits() {
+    local n=${1:-61}
+    [[ "$n" =~ ^[0-9]+$ ]] || phi_die "digits wants a number, got '$n'"
+    [ "$n" -le 5000 ] || phi_die "5000 digits max. φ is infinite, your terminal isn't"
+    command -v bc >/dev/null || phi_die "need bc for this one"
+    BC_LINE_LENGTH=0 bc -l <<<"scale=$n; (1 + sqrt(5)) / 2"
+}
+
+daedalus_comment_for() {
+    case "$1" in
+    *.mjs | *.js | *.ts) printf '//' ;;
+    *.lua) printf -- '--' ;;
+    *) printf '#' ;;
+    esac
+}
+
+# builds the header block. the rule is 55 wide with φ at column 34
+# (both fibonacci numbers)
+daedalus_header() {
+    local c=$1 name=$2
+    local top bot
+    top="$(printf '%33s' '' | sed 's/ /─/g')φ$(printf '%21s' '' | sed 's/ /─/g')"
+    bot="$(printf '%55s' '' | sed 's/ /─/g')"
+    printf '%s %s\n' "$c" "$top"
+    printf '%s  pwnbox·phi :: %s\n' "$c" "$name"
+    printf '%s  φ = 1.6180339887…   phi was here\n' "$c"
+    printf '%s %s\n' "$c" "$bot"
+}
+
+# puts the header under the shebang, or at the top if there isn't one.
+# skips files that already have it, so running it twice is fine.
+daedalus_stamp() {
+    local file=$1 c name tmp
+    [ -f "$file" ] || {
+        phi_warn "no such file: $file"
+        return 1
+    }
+    # only check the top lines. this file has the marker string in its own code
+    if head -n 4 "$file" | grep -q 'pwnbox·phi :: '; then
+        phi_say "${PHI_DIM}already marked${PHI_RESET} $file"
+        return 0
+    fi
+    c=$(daedalus_comment_for "$file")
+    name=$(basename -- "$file")
+    tmp=$(mktemp)
+    if head -n1 "$file" | grep -q '^#!'; then
+        { head -n1 "$file"; daedalus_header "$c" "$name"; tail -n +2 "$file"; } >"$tmp"
+    else
+        { daedalus_header "$c" "$name"; cat "$file"; } >"$tmp"
+    fi
+    cat "$tmp" >"$file" # cat keeps the original mode bits
+    rm -f "$tmp"
+    phi_ok "marked $file"
+}
+
+# runs the real functions against a temp file. exits 1 if any check fails.
+okabe_selftest() {
+    local fails=() total=0 scratch out prefix
+    local LC_ALL=C.UTF-8 # so ${#x} counts glyphs, not bytes
+
+    total=$((total + 1))
+    out=$(kurisu_digits 10 2>/dev/null) || true # phi_die exits the subshell, so the || has to go out here
+    [ "$out" = "1.6180339887" ] || fails+=("digits(10) gave '$out'")
+
+    total=$((total + 1))
+    out=$(phi_rule 55 | sed 's/\x1b\[[0-9;]*m//g')
+    prefix=${out%%φ*}
+    [ "${#prefix}" -eq 33 ] || fails+=("phi_rule put φ at column $((${#prefix} + 1)), wants 34")
+
+    total=$((total + 1))
+    scratch=$(mktemp)
+    printf '#!/usr/bin/env bash\necho hi\n' >"$scratch"
+    daedalus_stamp "$scratch" >/dev/null
+    daedalus_stamp "$scratch" >/dev/null
+    [ "$(grep -c 'pwnbox·phi :: ' "$scratch")" = "1" ] || fails+=("stamp isn't idempotent")
+    [ "$(head -n1 "$scratch")" = "#!/usr/bin/env bash" ] || fails+=("stamp clobbered the shebang")
+    bash "$scratch" >/dev/null || fails+=("stamped script stopped running")
+    rm -f "$scratch"
+
+    total=$((total + 1))
+    out=$(daedalus_header '#' x | head -n1 | sed 's/^# //')
+    [ "${#out}" -eq 55 ] || fails+=("header rule is ${#out} wide, wants 55")
+
+    if [ "${#fails[@]}" -gt 0 ]; then
+        printf '  %s✗ %d of %d failed%s\n' "$PHI_RED" "${#fails[@]}" "$total" "$PHI_RESET"
+        printf '    - %s\n' "${fails[@]}"
+        exit 1
+    fi
+    phi_ok "all $total checks passed"
+}
+
+cmd=${1:-banner}
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+banner) phi_banner ;;
+spiral) phi_spiral ;;
+digits)
+    out=$(kurisu_digits "${1:-61}")
+    if [ -t 1 ]; then
+        for ((i = 0; i < ${#out}; i++)); do
+            printf '%s%s' "$PHI_GOLD" "${out:i:1}"
+            sleep 0.01
+        done
+        printf '%s\n' "$PHI_RESET"
+    else
+        printf '%s\n' "$out"
+    fi
+    ;;
+stamp)
+    [ "$#" -gt 0 ] || phi_die "stamp what? give me files"
+    rc=0
+    for f in "$@"; do daedalus_stamp "$f" || rc=1; done
+    exit "$rc"
+    ;;
+selftest) okabe_selftest ;;
+-h | --help | help) phi_usage ;;
+*)
+    phi_usage
+    exit 2
+    ;;
+esac

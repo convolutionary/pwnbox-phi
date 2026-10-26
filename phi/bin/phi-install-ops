@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-install-ops
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# the parts of phi-install that touch disks and write config. sourced by
+# phi-install; everything destructive goes through `run`, so PHI_DRY=1
+# prints the commands instead of running them.
+#
+# reads these globals, set by the screens:
+#   disk firmware mode encrypt fs host user fullname tz extras flake_src
+# and fills these in once the disk is partitioned:
+#   ESP_PART   the efi system partition (uefi only)
+#   BOOT_PART  where kernels go: the esp on a wiped uefi disk, a fresh
+#              xbootldr partition next to windows, ext4 /boot on bios
+#   ROOT_PART  the partition that becomes / (or holds luks)
+
+MNT=${PHI_MNT:-/mnt}
+LOG=${PHI_LOG:-/tmp/phi-install.log}
+ESP_PART="" BOOT_PART="" ROOT_PART=""
+
+run() {
+    if [ -n "${PHI_DRY:-}" ]; then
+        printf '  %s$%s %s\n' "$PHI_BRONZE" "$PHI_RESET" "$*" | tee -a "$LOG"
+        return 0
+    fi
+    printf '$ %s\n' "$*" >>"$LOG"
+    "$@" >>"$LOG" 2>&1
+}
+
+# nvme0n1 -> nvme0n1p2, sda -> sda2
+part() {
+    case "$disk" in
+    *[0-9]) printf '%sp%s' "$disk" "$1" ;;
+    *) printf '%s%s' "$disk" "$1" ;;
+    esac
+}
+
+# the stick we booted from shouldn't be offered as a target
+ops_boot_disk() {
+    local src
+    src=$(findmnt -no SOURCE /iso 2>/dev/null || true)
+    [ -n "$src" ] || return 0
+    lsblk -no PKNAME "$src" 2>/dev/null | head -n1 | sed 's|^|/dev/|'
+}
+
+# one "value|label|detail" line per whole disk, ready for tui_menu.
+# disks with windows on them say so
+ops_disk_items() {
+    local boot name size model tran tag
+    boot=$(ops_boot_disk)
+    # json because lsblk leaves an empty TRAN as blank space, which shifts
+    # every column after it
+    while IFS=$'\t' read -r name size tran model; do
+        [ "$name" = "$boot" ] && continue
+        tag=""
+        dual_windows_on "$name" >/dev/null && tag="  · windows"
+        printf '%s|%s|%s  %s %s%s\n' "$name" "${name#/dev/}" "$size" "$tran" "$model" "$tag"
+    done < <(lsblk -J -dnpo NAME,SIZE,TRAN,MODEL -e 1,7,11 2>/dev/null |
+        jq -r '.blockdevices[] | [.name, .size, (.tran // ""), (.model // "" | gsub("\\s+$"; ""))] | @tsv')
+}
+
+# wiping the whole disk.
+# uefi: 1 = esp (also /boot), 2 = root
+# bios: 1 = grub stub, 2 = /boot, 3 = root. grub can't unlock luks2 with
+# argon2id, so /boot has to sit outside the encrypted part on bios too
+ops_partition_wipe() {
+    local root_type=8300
+    [ "$encrypt" = "yes" ] && root_type=8309
+    run wipefs -af "$disk"
+    run sgdisk --zap-all "$disk"
+    if [ "$firmware" = "uefi" ]; then
+        # 987 MiB: big enough for a pile of generations, and a fibonacci number
+        run sgdisk -n1:1MiB:+987MiB -t1:ef00 -c1:PHI_EFI \
+            -n2:0:0 -t2:"$root_type" -c2:PHI_ROOT "$disk"
+        ESP_PART=$(part 1) BOOT_PART=$(part 1) ROOT_PART=$(part 2)
+    else
+        run sgdisk -n1:1MiB:+1MiB -t1:ef02 -c1:PHI_BIOS \
+            -n2:0:+987MiB -t2:8300 -c2:PHI_BOOT \
+            -n3:0:0 -t3:"$root_type" -c3:PHI_ROOT "$disk"
+        BOOT_PART=$(part 2) ROOT_PART=$(part 3)
+    fi
+    run partprobe "$disk"
+    run udevadm settle
+}
+
+ops_partition() {
+    if [ "$mode" = "alongside" ]; then
+        dual_partition
+    else
+        ops_partition_wipe
+    fi
+}
+
+# luks2 with argon2id (cryptsetup's default for luks2, spelled out so
+# nobody has to look it up). cryptsetup asks for the passphrase itself, on
+# the real terminal, so it never passes through this script
+LUKS_ARGS=(--type luks2 --pbkdf argon2id --cipher aes-xts-plain64 --key-size 512)
+
+ops_encrypt() {
+    if [ -n "${PHI_DRY:-}" ]; then
+        run cryptsetup luksFormat "${LUKS_ARGS[@]}" "$ROOT_PART"
+        run cryptsetup open "$ROOT_PART" phiroot
+        return 0
+    fi
+    tui_suspend
+    printf '\n  %sφ%s pick a disk passphrase. you type it at every boot, so make it one you remember.\n\n' \
+        "$PHI_AMBER" "$PHI_RESET"
+    cryptsetup luksFormat "${LUKS_ARGS[@]}" --batch-mode --verify-passphrase "$ROOT_PART" || return 1
+    printf '\n  %sφ%s same passphrase once more to unlock it now\n\n' "$PHI_AMBER" "$PHI_RESET"
+    cryptsetup open "$ROOT_PART" phiroot || return 1
+    tui_resume
+}
+
+ops_root_dev() {
+    if [ "$encrypt" = "yes" ]; then printf '/dev/mapper/phiroot'; else printf '%s' "$ROOT_PART"; fi
+}
+
+ops_format() {
+    local root sv
+    root=$(ops_root_dev)
+    if [ "$mode" = "alongside" ]; then
+        # windows' esp is left exactly as it is. only the new xbootldr gets made
+        run mkfs.fat -F32 -n PHI_XBOOT "$BOOT_PART"
+    elif [ "$firmware" = "uefi" ]; then
+        run mkfs.fat -F32 -n PHI_EFI "$BOOT_PART"
+    else
+        run mkfs.ext4 -F -L PHI_BOOT "$BOOT_PART"
+    fi
+    if [ "$fs" = "btrfs" ]; then
+        run mkfs.btrfs -f -L phiroot "$root"
+        run mount "$root" "$MNT"
+        for sv in @ @home @nix; do run btrfs subvolume create "$MNT/$sv"; done
+        run umount "$MNT"
+    else
+        run mkfs.ext4 -F -L phiroot "$root"
+    fi
+}
+
+ops_mount() {
+    local root opts="noatime,compress=zstd"
+    root=$(ops_root_dev)
+    if [ "$fs" = "btrfs" ]; then
+        run mount -o "subvol=@,$opts" "$root" "$MNT"
+        run mkdir -p "$MNT/home" "$MNT/nix"
+        run mount -o "subvol=@home,$opts" "$root" "$MNT/home"
+        run mount -o "subvol=@nix,$opts" "$root" "$MNT/nix"
+    else
+        run mount "$root" "$MNT"
+    fi
+    run mkdir -p "$MNT/boot"
+    if [ "$mode" = "alongside" ]; then
+        # systemd-boot goes on windows' esp at /efi, kernels on xbootldr at /boot
+        run mkdir -p "$MNT/efi"
+        run mount -o umask=0077 "$ESP_PART" "$MNT/efi"
+        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot"
+    elif [ "$firmware" = "uefi" ]; then
+        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot"
+    else
+        run mount "$BOOT_PART" "$MNT/boot"
+    fi
+}
+
+# the iso carries the flake read-only in the store; the new system gets a
+# writable copy in the user's home so ./scripts/install.sh works from there
+ops_flake_dir() { printf '%s/home/%s/pwnbox' "$MNT" "$user"; }
+
+ops_copy_flake() {
+    local dst
+    dst=$(ops_flake_dir)
+    run mkdir -p "$dst"
+    run cp -rT --no-preserve=mode,ownership "$flake_src" "$dst"
+    run chmod -R u+w "$dst"
+}
+
+has() { case " $extras " in *" $1 "*) echo true ;; *) echo false ;; esac }
+
+# hosts/<host>/default.nix, in the same shape as hosts/nixos/default.nix
+ops_host_nix() {
+    cat <<EOF
+# written by phi-install on $(date +%F). edit freely, rebuild with
+# ./scripts/install.sh switch
+{ pkgs, ... }:
+{
+  imports = [
+    ./hardware-configuration.nix
+    ./boot.nix
+  ];
+
+  pwnbox = {
+    username = "$user";
+    fullName = "$fullname";
+    hostName = "$host";
+    timeZone = "$tz";
+
+    desktop.enable = $(has desktop);
+
+    vpn.mullvad = $(has mullvad);
+
+    virtualisation = {
+      docker = $(has docker);
+      libvirtd = $(has libvirtd);
+      wireshark = $(has wireshark);
+    };
+
+    packages = {
+      hacking = $(has hacking);
+      gaming = $(has gaming);
+      creative = $(has creative);
+    };
+
+    phi.hardening = {
+      usbguard = $(has usbguard);
+      noWebcam = $(has nowebcam);
+    };
+  };
+
+  boot.kernelPackages = pkgs.linuxPackages_latest;
+}
+EOF
+}
+
+ops_boot_nix() {
+    if [ "$mode" = "alongside" ]; then
+        dual_boot_nix
+    elif [ "$firmware" = "uefi" ]; then
+        cat <<'EOF'
+# written by phi-install
+{ ... }:
+{
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+  # each generation's kernel + initrd lands on the 987 MiB esp
+  boot.loader.systemd-boot.configurationLimit = 8;
+  boot.loader.timeout = 1;
+}
+EOF
+    else
+        cat <<EOF
+# written by phi-install
+{ ... }:
+{
+  boot.loader.grub.enable = true;
+  boot.loader.grub.device = "$disk";
+  boot.loader.timeout = 1;
+}
+EOF
+    fi
+}
+
+ops_write_host() {
+    local dir
+    dir="$(ops_flake_dir)/hosts/$host"
+    mkdir -p "$dir"
+    if [ -n "${PHI_DRY:-}" ]; then
+        # dry runs still write the files, into PHI_MNT, so they can be checked
+        printf '  %s$%s nixos-generate-config --root %s --show-hardware-config > %s\n' \
+            "$PHI_BRONZE" "$PHI_RESET" "$MNT" "$dir/hardware-configuration.nix" | tee -a "$LOG"
+        printf '{ ... }: { }\n' >"$dir/hardware-configuration.nix"
+    else
+        nixos-generate-config --root "$MNT" --show-hardware-config >"$dir/hardware-configuration.nix" 2>>"$LOG" || return 1
+    fi
+    ops_host_nix >"$dir/default.nix"
+    ops_boot_nix >"$dir/boot.nix"
+}
+
+# passwd prompts on the real terminal; the password never touches this script
+ops_set_password() {
+    if [ -n "${PHI_DRY:-}" ]; then
+        run nixos-enter --root "$MNT" -c "passwd $user"
+        return 0
+    fi
+    tui_suspend
+    printf '\n  %sφ%s password for %s%s%s (you log in and sudo with this)\n\n' "$PHI_AMBER" "$PHI_RESET" "$PHI_BOLD" "$user" "$PHI_RESET"
+    until nixos-enter --root "$MNT" -c "passwd $user"; do
+        printf '\n  %s!%s that didn'"'"'t take, try again\n\n' "$PHI_AMBER" "$PHI_RESET"
+    done
+    tui_resume
+}
+
+ops_fix_owner() {
+    run nixos-enter --root "$MNT" -c "chown -R $user:users /home/$user/pwnbox"
+}
+
+ops_unmount() {
+    run umount -R "$MNT"
+    [ "$encrypt" = "yes" ] && run cryptsetup close phiroot
+    return 0
+}

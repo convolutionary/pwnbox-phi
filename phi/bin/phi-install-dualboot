@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-install-dualboot
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# installing next to windows. sourced by phi-install after phi-install-ops.
+#
+# the rules:
+#   - never resize or touch a windows partition. you shrink windows from
+#     windows (disk management -> shrink volume), we use the free space
+#   - uefi only. windows on bios means an mbr disk, and repartitioning that
+#     as gpt would take windows with it
+#   - windows' esp is usually 100 MiB, too small for nixos kernels. so
+#     systemd-boot goes on the esp (it's tiny) and the kernels go on a new
+#     987 MiB xbootldr partition. systemd-boot picks up windows boot manager
+#     from the esp without being told
+#
+# for tests without real disks:
+#   PHI_FAKE_WINDOWS="/dev/nvme0n1:/dev/nvme0n1p1:no"   disk:esp:bitlocker
+#   PHI_FAKE_FREE_GIB=120
+
+DUAL_MIN_GIB=34  # fibonacci, and enough for a desktop install
+DUAL_WANT_GIB=89 # what the full pentest toolset is comfortable with
+ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+declare -A DUAL_ESP_CACHE=()
+
+# prints the esp that holds windows boot manager on DISK, if there is one
+dual_windows_on() {
+    local d=$1 esp mp found=""
+    if [ -n "${PHI_FAKE_WINDOWS:-}" ]; then
+        IFS=: read -r fd fe _ <<<"$PHI_FAKE_WINDOWS"
+        [ "$fd" = "$d" ] && { printf '%s' "$fe"; return 0; }
+        return 1
+    fi
+    if [ -n "${DUAL_ESP_CACHE[$d]+x}" ]; then
+        [ -n "${DUAL_ESP_CACHE[$d]}" ] && { printf '%s' "${DUAL_ESP_CACHE[$d]}"; return 0; }
+        return 1
+    fi
+    [ "$(id -u)" -eq 0 ] || { DUAL_ESP_CACHE[$d]=""; return 1; }
+    while read -r esp; do
+        mp=$(mktemp -d)
+        # read-only, and unmounted straight after. windows never notices
+        if mount -o ro "$esp" "$mp" 2>/dev/null; then
+            find "$mp" -maxdepth 4 -ipath '*/efi/microsoft/boot/bootmgfw.efi' 2>/dev/null | grep -q . && found=$esp
+            umount "$mp"
+        fi
+        rmdir "$mp"
+        [ -n "$found" ] && break
+    done < <(lsblk -J -po NAME,PARTTYPE "$d" 2>/dev/null |
+        jq -r --arg g "$ESP_GUID" '.. | objects | select(.parttype? == $g) | .name')
+    DUAL_ESP_CACHE[$d]=$found
+    [ -n "$found" ] && { printf '%s' "$found"; return 0; }
+    return 1
+}
+
+# every disk with windows on it, one per line, for the welcome screen
+dual_windows_anywhere() {
+    local d
+    if [ -n "${PHI_FAKE_WINDOWS:-}" ]; then
+        printf '%s\n' "${PHI_FAKE_WINDOWS%%:*}"
+        return
+    fi
+    while read -r d; do
+        dual_windows_on "$d" >/dev/null && printf '%s\n' "$d"
+    done < <(lsblk -dnpo NAME -e 1,7,11 2>/dev/null)
+}
+
+# bitlocker volumes mean a recovery key prompt is likely once the boot
+# order changes, so the screen warns about it
+dual_bitlocker() {
+    if [ -n "${PHI_FAKE_WINDOWS:-}" ]; then
+        [ "${PHI_FAKE_WINDOWS##*:}" = "yes" ]
+        return
+    fi
+    lsblk -no FSTYPE "$disk" 2>/dev/null | grep -qi bitlocker
+}
+
+# size of the largest unpartitioned block on DISK, in whole GiB
+dual_free_gib() {
+    local d=$1 first last ss
+    if [ -n "${PHI_FAKE_FREE_GIB:-}" ]; then
+        printf '%s' "$PHI_FAKE_FREE_GIB"
+        return
+    fi
+    first=$(sgdisk -F "$d" 2>/dev/null | tail -n1)
+    last=$(sgdisk -E "$d" 2>/dev/null | tail -n1)
+    ss=$(blockdev --getss "$d" 2>/dev/null || echo 512)
+    if ! [[ "$first" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || [ "$last" -le "$first" ]; then
+        printf '0'
+        return
+    fi
+    printf '%s' $(((last - first + 1) * ss / 1073741824))
+}
+
+dual_uuid() {
+    if [ -n "${PHI_DRY:-}" ]; then
+        # stable placeholders keep dry-run output readable
+        printf '%s' "${1}0000000-0000-4000-8000-000000000000"
+        return
+    fi
+    cat /proc/sys/kernel/random/uuid
+}
+
+# two new partitions in the largest free block: xbootldr, then root.
+# sgdisk's partition number 0 means "next free slot" and start 0 means
+# "start of the largest free block", so nothing that exists gets touched.
+# the new ones are found by partuuid afterwards, since their numbers
+# depend on what windows already has
+dual_partition() {
+    local xb root root_type=8300
+    [ "$encrypt" = "yes" ] && root_type=8309
+    xb=$(dual_uuid a)
+    root=$(dual_uuid b)
+    ESP_PART=$(dual_windows_on "$disk") || return 1
+    run sgdisk -n0:0:+987MiB -t0:ea00 -u0:"$xb" -c0:PHI_XBOOT "$disk"
+    run sgdisk -n0:0:0 -t0:"$root_type" -u0:"$root" -c0:PHI_ROOT "$disk"
+    run partprobe "$disk"
+    run udevadm settle
+    BOOT_PART=/dev/disk/by-partuuid/$xb
+    ROOT_PART=/dev/disk/by-partuuid/$root
+    if [ -z "${PHI_DRY:-}" ] && { [ ! -e "$BOOT_PART" ] || [ ! -e "$ROOT_PART" ]; }; then
+        echo "new partitions didn't show up under /dev/disk/by-partuuid" >>"$LOG"
+        return 1
+    fi
+}
+
+dual_boot_nix() {
+    cat <<'EOF'
+# written by phi-install: dual boot with windows
+{ ... }:
+{
+  boot.loader.systemd-boot.enable = true;
+  boot.loader.efi.canTouchEfiVariables = true;
+
+  # windows' esp is small, so systemd-boot itself lives there (/efi) and the
+  # kernels live on the xbootldr partition phi-install made (/boot)
+  boot.loader.efi.efiSysMountPoint = "/efi";
+  boot.loader.systemd-boot.xbootldrMountPoint = "/boot";
+  boot.loader.systemd-boot.configurationLimit = 8;
+
+  # windows boot manager shows up in the menu by itself. 5s to pick it
+  boot.loader.timeout = 5;
+
+  # windows keeps the hardware clock in local time. match it, or one of the
+  # two is always an hour or two off after switching
+  time.hardwareClockInLocalTime = true;
+}
+EOF
+}

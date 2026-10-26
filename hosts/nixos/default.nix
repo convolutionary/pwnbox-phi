@@ -1,0 +1,40 @@
+{
+  pkgs,
+  ...
+}:
+{
+  imports = [
+    ./hardware-configuration.nix
+    ./boot.nix
+  ];
+
+  pwnbox = {
+    hostName = "nixos";
+    timeZone = "Europe/Berlin";
+
+    desktop = {
+      enable = true;
+      accessibility = false;
+      mainMonitor = "HDMI-A-2";
+      leftMonitor = "DP-1";
+    };
+
+    # φ: mullvad on, lockdown arms itself once you `phi-vpn login`
+    vpn.mullvad = true;
+    phi.vpn.relay = "";
+
+    virtualisation = {
+      docker = true;
+      libvirtd = true;
+      wireshark = true;
+    };
+
+    packages = {
+      hacking = true;
+      gaming = true;
+    };
+  };
+
+  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.initrd.compressor = "xz";
+}

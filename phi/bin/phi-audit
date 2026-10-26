@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-audit
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -uo pipefail # no -e: checks are expected to fail on a box that isn't hardened
+
+# checks the running system for the settings hardening.nix and
+# phi/hardening.nix set. read-only, no root needed. exits 1 if anything fails.
+#
+#   phi-audit            full run, pokes am.i.mullvad.net
+#   phi-audit --offline  skip anything that touches the network
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=phi-mark
+. "${PHI_MARK:-$here/phi-mark}"
+
+offline=0
+[ "${1:-}" = "--offline" ] && offline=1
+
+passed=0
+failed=0
+skipped=0
+fails=()
+
+# runs one check and prints its row. checks return 0 = pass, 1 = fail, 2 = can't tell
+athena_judge() {
+    local label=$1 detail rc
+    shift
+    detail=$("$@" 2>/dev/null)
+    rc=$?
+    case "$rc" in
+    0)
+        passed=$((passed + 1))
+        athena_row "$PHI_GREEN✓" "$label" "$PHI_DIM$detail"
+        ;;
+    2)
+        skipped=$((skipped + 1))
+        athena_row "$PHI_BRONZE·" "$label" "$PHI_DIM${detail:-skipped}" dim
+        ;;
+    *)
+        failed=$((failed + 1))
+        fails+=("$label")
+        athena_row "$PHI_RED✗" "$label" "$PHI_RED$detail"
+        ;;
+    esac
+}
+
+athena_section() { phi_section "$1"; }
+
+# "  ✓ label ··········· detail" with the leaders ending at the same column.
+# labels are plain ascii, so ${#label} is their on-screen width
+athena_row() {
+    local mark=$1 label=$2 detail=$3 style=${4:-} dots
+    dots=$((34 - ${#label}))
+    [ "$dots" -lt 2 ] && dots=2
+    [ "$style" = "dim" ] && label="$PHI_DIM$label"
+    printf '  %s%s %s%s %s%s%s %s%s\n' "$mark" "$PHI_RESET" "$label" "$PHI_RESET" \
+        "$PHI_BRONZE" "$(printf '%*s' "$dots" '' | sed 's/ /·/g')" "$PHI_RESET" "$detail" "$PHI_RESET"
+}
+
+# --- checks ---------------------------------------------------------------
+
+sysctl_is() {
+    local key=$1 want=$2 got
+    got=$(cat "/proc/sys/${key//.//}" 2>/dev/null) || {
+        echo "missing"
+        return 2
+    }
+    echo "$got"
+    [ "$got" = "$want" ]
+}
+
+cmdline_has() {
+    grep -qw -- "$1" /proc/cmdline && echo "set" || {
+        echo "not on cmdline"
+        return 1
+    }
+}
+
+mount_is_tmpfs() {
+    local fs
+    fs=$(findmnt -no FSTYPE "$1" 2>/dev/null) || {
+        echo "not mounted"
+        return 1
+    }
+    echo "$fs"
+    [ "$fs" = "tmpfs" ]
+}
+
+swap_only_zram() {
+    local devs
+    devs=$(awk 'NR > 1 { print $1 }' /proc/swaps)
+    [ -z "$devs" ] && {
+        echo "no swap"
+        return 0
+    }
+    echo "$devs" | tr '\n' ' '
+    ! grep -qv '^/dev/zram' <<<"$devs"
+}
+
+unit_off() {
+    systemctl is-active --quiet "$1" && {
+        echo "running"
+        return 1
+    }
+    echo "off"
+}
+
+unit_on() {
+    systemctl is-active --quiet "$1" || {
+        echo "not running"
+        return 1
+    }
+    echo "running"
+}
+
+apparmor_on() {
+    [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ] && echo "enabled" || {
+        echo "disabled"
+        return 1
+    }
+}
+
+# fails if anything listens on a non-loopback address
+open_ports() {
+    command -v ss >/dev/null || return 2
+    local doors
+    doors=$(ss -Htuln 2>/dev/null | awk '{ print $5 }' |
+        grep -Ev '^(127\.|\[::1\]|::1|\[?fe80)' | sort -u | tr '\n' ' ')
+    if [ -z "$doors" ]; then
+        echo "nothing listening outside loopback"
+        return 0
+    fi
+    echo "$doors"
+    return 1
+}
+
+mac_random() {
+    command -v NetworkManager >/dev/null || return 2
+    local conf
+    conf=$(NetworkManager --print-config 2>/dev/null) || return 2
+    if grep -q 'wifi.cloned-mac-address=random' <<<"$conf" && grep -q 'ethernet.cloned-mac-address=random' <<<"$conf"; then
+        echo "wifi + ethernet"
+        return 0
+    fi
+    echo "not randomised on every link"
+    return 1
+}
+
+dhcp_hostname_hidden() {
+    command -v NetworkManager >/dev/null || return 2
+    NetworkManager --print-config 2>/dev/null | grep -q 'ipv4.dhcp-send-hostname=false' && echo "hidden" || {
+        echo "router can see your hostname"
+        return 1
+    }
+}
+
+mullvad_daemon() {
+    command -v mullvad >/dev/null || {
+        echo "not installed"
+        return 1
+    }
+    unit_on mullvad-daemon
+}
+
+mullvad_lockdown() {
+    command -v mullvad >/dev/null || return 2
+    mullvad lockdown-mode get 2>/dev/null | grep -q ': on' && echo "on" || {
+        echo "off (traffic leaks when the tunnel drops)"
+        return 1
+    }
+}
+
+mullvad_autoconnect() {
+    command -v mullvad >/dev/null || return 2
+    mullvad auto-connect get 2>/dev/null | grep -qi ': on' && echo "on" || {
+        echo "off"
+        return 1
+    }
+}
+
+mullvad_exit() {
+    [ "$offline" -eq 1 ] && {
+        echo "--offline"
+        return 2
+    }
+    local raw
+    raw=$(curl -fsS --max-time 8 https://am.i.mullvad.net/json) || {
+        echo "unreachable"
+        return 2
+    }
+    [ "$(jq -r '.mullvad_exit_ip' <<<"$raw")" = "true" ] && echo "$(jq -r '.mullvad_exit_ip_hostname' <<<"$raw")" || {
+        echo "exit $(jq -r '.ip' <<<"$raw") is not mullvad"
+        return 1
+    }
+}
+
+suid_count() {
+    local n
+    n=$(find /run/wrappers/bin -maxdepth 1 -type f -perm -4000 2>/dev/null | wc -l)
+    echo "$n suid wrappers"
+    [ "$n" -le 21 ] # 21 is a guess at a sane ceiling (and fibonacci). raise it if you add suid stuff on purpose
+}
+
+# --- run ------------------------------------------------------------------
+
+phi_banner "phi-audit · how golden is this box?"
+
+athena_section "kernel"
+athena_judge "dmesg locked to root" sysctl_is kernel.dmesg_restrict 1
+athena_judge "kernel pointers hidden" sysctl_is kernel.kptr_restrict 2
+athena_judge "unprivileged bpf off" sysctl_is kernel.unprivileged_bpf_disabled 2
+athena_judge "kexec disabled" sysctl_is kernel.kexec_load_disabled 1
+athena_judge "module loading locked" sysctl_is kernel.modules_disabled 1
+athena_judge "sysrq off" sysctl_is kernel.sysrq 0
+athena_judge "io_uring restricted" sysctl_is kernel.io_uring_disabled 1
+athena_judge "full aslr" sysctl_is kernel.randomize_va_space 2
+athena_judge "core dumps to /dev/null" sysctl_is kernel.core_pattern /dev/null
+athena_judge "init_on_free" cmdline_has init_on_free=1
+athena_judge "slab_nomerge" cmdline_has slab_nomerge
+athena_judge "apparmor" apparmor_on
+
+athena_section "network"
+athena_judge "firewall" unit_on firewall
+athena_judge "nothing listening outside lo" open_ports
+athena_judge "ignores pings" sysctl_is net.ipv4.icmp_echo_ignore_all 1
+athena_judge "no icmp redirects" sysctl_is net.ipv4.conf.all.accept_redirects 0
+athena_judge "tcp timestamps off" sysctl_is net.ipv4.tcp_timestamps 0
+athena_judge "ipv6 temp addresses" sysctl_is net.ipv6.conf.all.use_tempaddr 2
+athena_judge "mac randomisation" mac_random
+athena_judge "dhcp hostname hidden" dhcp_hostname_hidden
+athena_judge "sshd off" unit_off sshd
+athena_judge "avahi off" unit_off avahi-daemon
+
+athena_section "mullvad"
+athena_judge "daemon" mullvad_daemon
+athena_judge "lockdown / kill switch" mullvad_lockdown
+athena_judge "auto-connect" mullvad_autoconnect
+athena_judge "exit ip is mullvad" mullvad_exit
+
+athena_section "zero trace"
+athena_judge "/var/log in ram" mount_is_tmpfs /var/log
+athena_judge "/tmp in ram" mount_is_tmpfs /tmp
+athena_judge "swap is zram only" swap_only_zram
+athena_judge "suid wrappers (max 21)" suid_count
+
+# --- grade ----------------------------------------------------------------
+
+graded=$((passed + failed))
+[ "$graded" -gt 0 ] || graded=1
+pct=$((passed * 100 / graded))
+
+# grade cutoffs: 95%, then 1/φ ≈ 61.8% and 1/φ² ≈ 38.2%
+if [ "$pct" -ge 95 ]; then
+    grade="golden" why="nothing to fix"
+elif [ "$pct" -ge 62 ]; then
+    grade="gilded" why="above the 1/φ cut"
+elif [ "$pct" -ge 38 ]; then
+    grade="brass" why="between the 1/φ² and 1/φ cuts"
+else
+    grade="flatlined" why="below 1/φ². start with the ✗ rows"
+fi
+
+printf '\n'
+phi_rule
+printf '  %s  %s%d/%d%s  %s%s%s%s' "$(phi_bar "$passed" "$graded")" "$PHI_BOLD" "$passed" "$graded" "$PHI_RESET" "$PHI_BOLD" "$PHI_AMBER" "$grade" "$PHI_RESET"
+[ "$skipped" -gt 0 ] && printf '  %s(%d skipped)%s' "$PHI_DIM" "$skipped" "$PHI_RESET"
+printf '\n'
+printf '  %s%s%s%s\n' "$PHI_DIM" "$PHI_ITAL" "$why" "$PHI_RESET"
+
+if [ "$failed" -gt 0 ]; then
+    phi_section "to fix"
+    printf "  $PHI_RED✗$PHI_RESET %s\n" "${fails[@]}"
+    exit 1
+fi
+phi_ok "every check passed"
