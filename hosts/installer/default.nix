@@ -54,7 +54,8 @@ in
   services.kmscon = {
     enable = true;
     hwRender = true;
-    autologinUser = "nixos";
+    # autologin comes from services.getty.autologinUser, which the
+    # installer profile already sets to nixos. kmscon's own option is gone
     fonts = [
       {
         name = "DejaVu Sans Mono";
