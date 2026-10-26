@@ -13,7 +13,7 @@ every size is a power of φ times one length, a (the φ ring's half-width):
 - right edge: the sunflower breaks up into falling dot columns
 - bottom: particle waves; corners: brackets, dot grids, + + + marks
 
-    python3 phi/art/make-banner.py        # writes banner.png next to it
+    python3 phi/art/make-banner.py        # writes banner.png (1618x1000) next to it
 """
 import math
 import os
@@ -287,8 +287,8 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")  # windows consoles choke on ✓
     out = sys.argv[1] if len(sys.argv) > 1 else HERE
     fails = []
-    # banner-wide is a golden rectangle itself: 1618 × 1000
-    for name, (w, h) in {"banner.png": (1920, 1080), "banner-wide.png": (1618, 1000)}.items():
+    # one banner, and it's a golden rectangle itself: 1618 × 1000
+    for name, (w, h) in {"banner.png": (1618, 1000)}.items():
         path = os.path.join(out, name)
         render(w, h).save(path, optimize=True)
         if Image.open(path).size != (w, h):
@@ -301,7 +301,7 @@ def main() -> int:
         "stroke tips at a·φ": in_phi(0, a * PHI, a) and not in_phi(0, a * PHI * 1.01, a),
         "inner edge at 1/√φ": not in_phi(a / math.sqrt(PHI) * 0.99, 0, a) and in_phi(a / math.sqrt(PHI) * 1.01, 0, a),
         "golden angle": abs(math.degrees(GOLDEN_ANGLE) - 137.5077640500378) < 1e-9,
-        "wide banner is golden": abs(1618 / 1000 - PHI) < 1e-3,
+        "banner is a golden rectangle": abs(1618 / 1000 - PHI) < 1e-3,
     }
     for name, ok in checks.items():
         if not ok:

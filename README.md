@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="phi/art/banner-wide.png" alt="pwnbox·phi" width="100%" />
+  <img src="phi/art/banner.png" alt="pwnbox·phi" width="100%" />
 </p>
 
 <p align="center">
@@ -14,10 +14,6 @@
   Mullvad is on from the first boot, the hardening goes further, it installs
   itself from its own ISO (next to Windows if you want), and everything it
   draws is laid out on the golden ratio.
-</p>
-
-<p align="center">
-  <img width="1672" height="941" alt="the pwnbox desktop" src="https://github.com/user-attachments/assets/046e063f-0d41-43b0-81e4-beefd37a2c09" />
 </p>
 
 ---
@@ -98,7 +94,7 @@ More in [φ phi](docs/usage/phi.md).
 - Boot partitions are 987 MiB, a Fibonacci number.
 - In the banner, the φ is cut out of a sunflower whose seeds sit at the
   golden angle (137.5°). Every size is a power of φ, the emblem sits on the
-  golden section, and `banner-wide.png` is 1618×1000.
+  golden section, and the banner itself is 1618×1000, a golden rectangle.
   `phi/art/make-banner.py` checks that geometry each time it renders.
 
 ## Documentation
