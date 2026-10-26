@@ -1,0 +1,66 @@
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: iso.yml
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# builds the phi installer iso on github's machines.
+#   - run it by hand from the actions tab (or `gh workflow run iso.yml`),
+#     the iso shows up as a download on the run page
+#   - push a tag like v1.618 and it also lands on a github release
+#
+# it evaluates the main host first: that's the cheap way to catch a broken
+# module before spending half an hour building the iso
+
+name: iso
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # only used to attach the iso to a release on tags
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # the runner starts with ~14 GB free. the nix store wants more
+      - name: make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: evaluate the nixos host
+        run: nix eval --raw .#nixosConfigurations.nixos.config.system.build.toplevel.drvPath
+
+      - name: build the installer iso
+        run: nix build .#images.x86_64-linux.installer --print-build-logs
+
+      - name: collect
+        run: |
+          mkdir out
+          cp result/iso/*.iso out/pwnbox-phi-installer-x86_64-linux.iso
+          cd out && sha256sum *.iso > SHA256SUMS && cat SHA256SUMS && ls -lh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pwnbox-phi-installer-x86_64-linux
+          path: out/
+          compression-level: 0 # it's already squashfs inside
+          retention-days: 13
+
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
