@@ -22,7 +22,8 @@ lib.mkIf cfg.enable (
         # ignore pings. the firewall drops them too, but this also covers
         # boot before the firewall is up
         "net.ipv4.icmp_echo_ignore_all" = 1;
-        "net.ipv6.conf.default.use_tempaddr" = 2;
+        # ipv6 temporary addresses: nixos already sets use_tempaddr = 2
+        # through networking.tempAddresses, defining it again is an error
       };
       networking.firewall.allowPing = false;
 
