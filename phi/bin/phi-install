@@ -29,7 +29,7 @@ libdir=$(dirname -- "$PHI_MARK")
 . "$libdir/phi-install-gpu"
 
 flake_src=${PHI_FLAKE:-/pwnbox}
-disk="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
+disk="" disk_summary="" ans="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
 free_gib=0
 
 # --- arguments --------------------------------------------------------------
@@ -95,6 +95,13 @@ screen_welcome() {
     TUI_STEP=0
     firmware=${PHI_FIRMWARE:-$([ -d /sys/firmware/efi ] && echo uefi || echo bios)}
     ram=$(awk '/^MemTotal:/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)
+    if [ -z "${PHI_DRY:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        phi_die "needs root: sudo phi-install"
+    fi
+    # an earlier run that died halfway may still have the disk mounted and
+    # luks open. let go of that first, or the windows check below can't see
+    # windows and the kernel can't reload the partition table later
+    ops_release_leftovers
     tui_header
     phi_banner "a few questions, then it gets to work"
     phi_section "this machine"
@@ -107,9 +114,6 @@ screen_welcome() {
     [ -n "${PHI_DRY:-}" ] && say "mode       ${PHI_AMBER}dry run, nothing gets written${PHI_RESET}"
     printf '\n'
     [ -f "$flake_src/flake.nix" ] || phi_die "no flake.nix in $flake_src. boot the pwnbox-phi installer iso, or set PHI_FLAKE"
-    if [ -z "${PHI_DRY:-}" ] && [ "$(id -u)" -ne 0 ]; then
-        phi_die "needs root: sudo phi-install"
-    fi
     [ -n "$(tui_answer disk)" ] && return 0
     tui_footer "enter start   q quit"
     while :; do
@@ -124,6 +128,7 @@ screen_network() {
     local pick
     TUI_STEP=1
     [ -n "${PHI_SKIP_NET:-}" ] && return 0
+    rfkill unblock wifi 2>/dev/null
     while ! curl -fsI --max-time 6 https://cache.nixos.org >/dev/null 2>&1; do
         TUI_SCREEN=text_network
         tui_menu pick "no connection" \
@@ -132,7 +137,16 @@ screen_network() {
             "skip|carry on offline|only works if everything is already cached" \
             "quit|quit|nothing written yet"
         case "$pick" in
-        wifi) tui_suspend; nmtui; tui_resume ;;
+        wifi)
+            # laptops often come up with wifi soft-blocked, and then nmtui
+            # just shows an empty list
+            rfkill unblock wifi 2>/dev/null
+            nmcli radio wifi on 2>/dev/null
+            sleep 2
+            tui_suspend
+            nmtui connect
+            tui_resume
+            ;;
         skip) return 0 ;;
         quit) tui_quit ;;
         esac
@@ -152,6 +166,10 @@ screen_disk() {
     fi
     TUI_SCREEN=text_disk
     tui_menu disk "where does it go?" "${items[@]}"
+    # /dev/disk/by-id/... in an answers file -> /dev/nvme0n1
+    disk=$(readlink -f "$disk")
+    [ -b "$disk" ] || [ -n "${PHI_DRY:-}" ] || phi_die "$disk isn't a block device"
+    [ "$disk" = "$(ops_boot_disk)" ] && phi_die "$disk is the stick you booted from"
     screen_mode
 }
 text_disk() {
@@ -166,6 +184,21 @@ screen_mode() {
     mode=wipe
     if [ -z "$win_esp" ]; then
         [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside, but there's no windows on $disk"
+        # no windows boot manager, but there's still something on it (a
+        # windows that lost its esp, an old linux, your data). say so now,
+        # not after it's gone
+        disk_summary=$(ops_disk_summary "$disk")
+        if [ -n "$disk_summary" ] && [ -z "$(tui_answer disk)" ]; then
+            TUI_SCREEN=text_nonempty
+            tui_menu ans "this disk isn't empty" \
+                "wipe|wipe it anyway|everything listed above goes" \
+                "back|pick another disk|" \
+                "quit|quit|nothing written yet"
+            case "$ans" in
+            back) PHI_ANS_DISK="" screen_disk ;;
+            quit) tui_quit ;;
+            esac
+        fi
         return 0
     fi
     free_gib=$(dual_free_gib "$disk")
@@ -207,6 +240,27 @@ screen_mode() {
         esac
     done
 }
+# the partitions on the picked disk that hold something, as review rows
+summary_rows() {
+    local name fstype size label
+    while IFS=$'\t' read -r name fstype size label; do
+        [ -n "$name" ] || continue
+        printf '  %s%-16s%s %-8s %8s  %s\n' "$PHI_AMBER" "${name#/dev/}" "$PHI_RESET" "$fstype" "$size" "$label"
+    done <<<"$disk_summary"
+}
+text_nonempty() {
+    say "${PHI_AMBER}${disk#/dev/}${PHI_RESET} has this on it:"
+    printf '\n'
+    summary_rows
+    printf '\n'
+    case "$disk_summary" in
+    *ntfs* | *BitLocker* | *"Microsoft reserved"* | *"Basic data partition"*)
+        say "${PHI_RED}that looks like windows or windows data.${PHI_RESET} back up anything you want first."
+        printf '\n'
+        ;;
+    esac
+}
+
 text_mode() {
     say "windows boot manager is on ${PHI_GOLD}${win_esp#/dev/}${PHI_RESET}."
     if [ "$firmware" != "uefi" ]; then
@@ -300,12 +354,26 @@ text_review() {
         review_row "boot" "uefi, systemd-boot on ${win_esp#/dev/} + new 987 MiB xbootldr"
         review_row "boot menu" "pwnbox-phi and windows, 5 s to pick"
         review_row "clock" "hardware clock in local time, like windows"
+        local old_phi
+        old_phi=$(dual_old_phi_parts "$disk")
+        if [ -n "$old_phi" ]; then
+            disk_summary=$(ops_disk_summary "$disk" | grep -F -f <(printf '%s\t\n' $old_phi))
+            printf '\n  %san earlier pwnbox-phi install on this disk gets erased:%s\n' "$PHI_RED" "$PHI_RESET"
+            summary_rows
+        fi
     else
         review_row "target" "${PHI_AMBER}$disk${PHI_RESET}  ${PHI_RED}(wiped)${PHI_RESET}"
         review_row "boot" "$firmware"
     fi
     review_row "encryption" "$encrypt"
     review_row "filesystem" "$fs"
+    if [ "$mode" != "alongside" ]; then
+        disk_summary=$(ops_disk_summary "$disk")
+        if [ -n "$disk_summary" ]; then
+            printf '\n  %sthis gets erased:%s\n' "$PHI_RED" "$PHI_RESET"
+            summary_rows
+        fi
+    fi
     phi_section "system"
     review_row "hostname" "$host"
     review_row "user" "$user ($fullname)"
@@ -390,6 +458,8 @@ screen_install() {
     phase "writing the host config" ops_write_host && phi_ok "hosts/$host written"
     phase "nixos-install" tui_run "building and installing (this is the long one)" "$LOG" \
         nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --flake "$(ops_flake_dir)#$host"
+    ops_copy_wifi && compgen -G "$MNT/etc/NetworkManager/system-connections/*.nmconnection" >/dev/null &&
+        phi_ok "wifi from the stick copied over, it connects at first boot"
     phase "setting your password" ops_set_password && phi_ok "password set for $user"
     phase "fixing ownership" ops_fix_owner
 }

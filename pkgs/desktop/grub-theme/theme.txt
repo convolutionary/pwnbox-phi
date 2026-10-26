@@ -28,13 +28,13 @@ terminal-box: "terminal_box_*.png"
   width = 40%
   height = 44%
   item_font = "Manrope Regular 16"
-  item_color = "#999999"
+  item_color = "#777777"
+  selected_item_font = "Manrope Regular 16"
   selected_item_color = "#ffffff"
   item_height = 44
   item_spacing = 8
   item_padding = 12
   item_icon_space = 0
-  selected_item_pixmap_style = "select_*.png"
 }
 
 + label {

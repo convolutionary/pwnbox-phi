@@ -157,6 +157,40 @@ goes through the installer script. Same for your user password, which
   (it picks up the LUKS device on its own)
 - `hosts/<hostname>/boot.nix`: systemd-boot on UEFI, GRUB on BIOS
 
+## If a step fails
+
+The installer stops at the first command that fails and says which step it
+was. The full log is at `/tmp/phi-install.log`. Running `sudo phi-install`
+again is safe:
+
+- whatever a failed run left behind (the target mounted at `/mnt`, the LUKS
+  container open) is released before any disk is scanned, so Windows is
+  still detected and the kernel can load the new partition table
+- next to Windows, the `PHI_XBOOT` / `PHI_ROOT` partitions from an earlier
+  attempt are removed and their space reused, so a rerun never piles up a
+  second pair. Windows' own partitions are never touched
+- partitions are found by the partuuid the installer gave them, never by
+  guessing their number
+- after partitioning, the installer checks that the kernel really loaded the
+  new table. If something still holds the disk, it stops there and says so,
+  instead of writing to partitions that don't exist
+
+Before a wipe, the review screen lists every partition that will be erased.
+If the disk isn't empty but has no Windows boot manager on it, you get a
+separate warning screen first.
+
+## Wifi
+
+On the stick, pick **connect to wifi** on the network screen. The installer
+unblocks the radio first, since many laptops start with it soft-blocked. The
+network you join is copied to the installed system, so it's online at first
+boot.
+
+On the installed system, `hardware.enableRedistributableFirmware` is on,
+because Intel, Realtek, MediaTek, Broadcom and Qualcomm cards all need
+firmware. The WPA2/WPA3 crypto modules are also loaded before
+`security.lockKernelModules` disables module loading.
+
 After the first boot, rebuild from the flake as usual:
 
 ```bash

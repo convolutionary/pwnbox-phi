@@ -23,6 +23,7 @@
   iproute2,
   jq,
   libnotify,
+  lvm2,
   ncurses,
   parted,
   util-linux,
@@ -53,6 +54,7 @@ let
     dosfstools
     e2fsprogs
     gptfdisk
+    lvm2 # dmsetup, to close leftover luks/lvm mappings
     parted
   ];
 in

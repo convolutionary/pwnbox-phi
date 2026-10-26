@@ -171,6 +171,22 @@ an older generation from the boot menu.
 GTK reloads its colour scheme awkwardly. The theme script toggles the GNOME
 colour scheme to nudge it; if a specific app still lags, restart that app.
 
+## Wifi connects on the stick but not after installing
+
+Installs made before this fix have no wifi firmware, and the module lock can
+stop WPA2/WPA3 from loading. `~/pwnbox` is a plain copy, not a git
+checkout. Over ethernet or a phone tether, copy the current repo over it
+(your `hosts/<host>` folder stays) and rebuild:
+
+```bash
+git clone https://github.com/convolutionary/pwnbox-phi /tmp/phi
+cp -rT /tmp/phi ~/pwnbox && rm -rf ~/pwnbox/.git
+cd ~/pwnbox && ./scripts/install.sh switch
+```
+
+If it still won't connect, `sudo dmesg | grep -iE 'firmware|iwlwifi|mt79|rtw'`
+shows which part is missing.
+
 ## Out of disk space
 
 Garbage collection runs daily and keeps 7 days. To reclaim more:
