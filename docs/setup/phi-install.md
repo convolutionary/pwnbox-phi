@@ -36,7 +36,7 @@ other ISO (`dd`, Ventoy).
 | disk | which disk. Disks with Windows are marked, and picking one asks: next to Windows, or wipe. The USB stick you booted from isn't listed |
 | layout | encryption yes/no, ext4 or btrfs |
 | system | hostname, username, full name, time zone |
-| extras | desktop, pentest toolset, Mullvad, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
+| extras | desktop, pentest toolset, Mullvad, NVIDIA driver (if there's a card), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
 | review | everything on one screen. Installing means typing the disk name |
 | install | runs it all, with the live log tail on screen |
 | done | reboot, or stay with the new system mounted at `/mnt` |
@@ -117,6 +117,22 @@ Things to know:
 In an answers file, `mode=alongside` or `mode=wipe`. `alongside` is refused
 if the disk has no Windows, the machine booted BIOS, or there's less than
 34 GiB free.
+
+## NVIDIA
+
+If there's an NVIDIA card, the extras list gets an **nvidia driver** entry,
+ticked. It writes `hosts/<hostname>/gpu.nix` with:
+
+- the open kernel modules (required for RTX 50, recommended from RTX 20 on)
+  and the latest driver
+- on laptops with an AMD or Intel GPU too: PRIME offload. The integrated GPU
+  runs the desktop and the NVIDIA card sleeps until you run something with
+  `nvidia-offload <program>`. Bus IDs are read from `lspci` at install time
+- every NVIDIA module loaded at boot, because the hardening locks module
+  loading afterwards and `nvidia_uvm` would otherwise miss its chance
+
+**Performance mode** (deep CPU sleep states off, max clocks) starts unticked
+when the machine has a battery, and ticked on desktops.
 
 ## Encryption
 

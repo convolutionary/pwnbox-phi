@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: phi-install-gpu
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+#
+# nvidia setup for phi-install. sourced after phi-install-ops.
+#
+# laptops with an nvidia card next to an amd/intel igpu get prime offload:
+# the igpu drives the desktop, `nvidia-offload <cmd>` puts a program on the
+# nvidia card. desktops with only an nvidia card just get the driver.
+#
+# for tests without the hardware:
+#   PHI_FAKE_GPUS="0000:01:00.0 10de NVIDIA GeForce RTX 5080 Laptop GPU;0000:65:00.0 1002 AMD Radeon 610M"
+
+# one "pci-address vendor-id name" line per display controller
+gpu_list() {
+    if [ -n "${PHI_FAKE_GPUS:-}" ]; then
+        tr ';' '\n' <<<"$PHI_FAKE_GPUS"
+        return
+    fi
+    lspci -Dnn 2>/dev/null | grep -E 'VGA compatible|3D controller|Display controller' |
+        sed -E 's/^([0-9a-f:.]+) [^:]+: (.*) \[([0-9a-f]{4}):[0-9a-f]{4}\].*/\1 \3 \2/'
+}
+
+# 0000:01:00.0 -> PCI:1:0:0, the decimal form hardware.nvidia.prime wants
+gpu_busid() {
+    local addr=${1#*:} bus dev fn
+    bus=${addr%%:*}
+    dev=${addr#*:}
+    dev=${dev%%.*}
+    fn=${addr##*.}
+    printf 'PCI:%d:%d:%d' "$((16#$bus))" "$((16#$dev))" "$((16#$fn))"
+}
+
+gpu_nvidia_name() { gpu_list | awk '$2 == "10de" { $1 = ""; $2 = ""; sub(/^  /, ""); print; exit }'; }
+
+has_nvidia() { [ -n "$(gpu_nvidia_name)" ]; }
+
+gpu_nix() {
+    local nv igpu ivendor prime=""
+    nv=$(gpu_list | awk '$2 == "10de" { print $1; exit }')
+    igpu=$(gpu_list | awk '$2 == "1002" || $2 == "8086" { print $1, $2; exit }')
+    if [ -n "$igpu" ]; then
+        ivendor=${igpu#* }
+        local key=amdgpuBusId
+        [ "$ivendor" = "8086" ] && key=intelBusId
+        prime="
+  # hybrid laptop: the integrated gpu runs the desktop, the nvidia card
+  # sleeps until something asks for it. run things on it with:
+  #   nvidia-offload <program>
+  hardware.nvidia.prime = {
+    offload.enable = true;
+    offload.enableOffloadCmd = true;
+    $key = \"$(gpu_busid "${igpu%% *}")\";
+    nvidiaBusId = \"$(gpu_busid "$nv")\";
+  };
+  hardware.nvidia.powerManagement.finegrained = true;
+"
+    fi
+    cat <<EOF
+# written by phi-install: $(gpu_nvidia_name)
+{ config, ... }:
+{
+  hardware.graphics.enable = true;
+  services.xserver.videoDrivers = [ "nvidia" ];
+
+  hardware.nvidia = {
+    # rtx 50 series only works with the open kernel modules, and they're
+    # nvidia's recommendation from turing (rtx 20) on anyway
+    open = true;
+    modesetting.enable = true;
+    powerManagement.enable = true;
+    package = config.boot.kernelPackages.nvidiaPackages.latest;
+  };
+
+  # hardening.nix locks module loading once the system is up. nvidia_uvm
+  # normally loads on first cuda use, which would be too late
+  boot.kernelModules = [
+    "nvidia"
+    "nvidia_modeset"
+    "nvidia_drm"
+    "nvidia_uvm"
+  ];
+$prime}
+EOF
+}

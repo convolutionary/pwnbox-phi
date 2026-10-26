@@ -73,6 +73,7 @@ stdenvNoCC.mkDerivation {
     install -Dm644 phi-tui $out/share/phi/phi-tui
     install -Dm644 phi-install-ops $out/share/phi/phi-install-ops
     install -Dm644 phi-install-dualboot $out/share/phi/phi-install-dualboot
+    install -Dm644 phi-install-gpu $out/share/phi/phi-install-gpu
     for tool in phi phi-vpn phi-audit phi-panic; do
       install -Dm755 "$tool" "$out/bin/$tool"
       wrapProgram "$out/bin/$tool" \

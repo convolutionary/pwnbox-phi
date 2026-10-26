@@ -185,7 +185,7 @@ ops_host_nix() {
 {
   imports = [
     ./hardware-configuration.nix
-    ./boot.nix
+    ./boot.nix$([ "$(has nvidia)" = true ] && printf '\n    ./gpu.nix')
   ];
 
   pwnbox = {
@@ -195,6 +195,8 @@ ops_host_nix() {
     timeZone = "$tz";
 
     desktop.enable = $(has desktop);
+
+    performance.enable = $(has performance);
 
     vpn.mullvad = $(has mullvad);
 
@@ -263,6 +265,8 @@ ops_write_host() {
     fi
     ops_host_nix >"$dir/default.nix"
     ops_boot_nix >"$dir/boot.nix"
+    [ "$(has nvidia)" = true ] && gpu_nix >"$dir/gpu.nix"
+    return 0
 }
 
 # passwd prompts on the real terminal; the password never touches this script

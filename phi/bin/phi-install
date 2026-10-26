@@ -25,6 +25,8 @@ libdir=$(dirname -- "$PHI_MARK")
 . "$libdir/phi-install-ops"
 # shellcheck source=phi-install-dualboot
 . "$libdir/phi-install-dualboot"
+# shellcheck source=phi-install-gpu
+. "$libdir/phi-install-gpu"
 
 flake_src=${PHI_FLAKE:-/pwnbox}
 disk="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
@@ -254,19 +256,31 @@ text_system() {
 }
 
 screen_extras() {
+    local items=() perf=on nv
     TUI_STEP=5
     TUI_SCREEN=""
-    tui_checklist extras "what goes on it?" \
-        "desktop|desktop|hyprland + gnome, the full pwnbox look|on" \
-        "hacking|pentest toolset|26 tool categories, big download|on" \
-        "mullvad|mullvad vpn|kill switch once you log in|on" \
-        "docker|docker|starts on demand|off" \
-        "libvirtd|libvirt / kvm|for vms|off" \
-        "wireshark|wireshark|and the wireshark group|off" \
-        "creative|creative apps|media and office|off" \
-        "gaming|gaming|steam and friends|off" \
-        "usbguard|usbguard|blocks usb devices plugged in later|off" \
+    # performance mode turns off deep c-states. great on a desktop, eats a
+    # laptop battery, so it starts unticked when there is one
+    compgen -G "${PHI_SYS:-/sys}/class/power_supply/BAT*" >/dev/null && perf=off
+    items=(
+        "desktop|desktop|hyprland + gnome, the full pwnbox look|on"
+        "hacking|pentest toolset|26 tool categories, big download|on"
+        "mullvad|mullvad vpn|kill switch once you log in|on"
+    )
+    if nv=$(gpu_nvidia_name) && [ -n "$nv" ]; then
+        items+=("nvidia|nvidia driver|${nv#NVIDIA }, open modules + prime offload|on")
+    fi
+    items+=(
+        "performance|performance mode|max clocks, no deep sleep. off on battery|$perf"
+        "docker|docker|starts on demand|off"
+        "libvirtd|libvirt / kvm|for vms|off"
+        "wireshark|wireshark|and the wireshark group|off"
+        "creative|creative apps|media and office|off"
+        "gaming|gaming|steam and friends|off"
+        "usbguard|usbguard|blocks usb devices plugged in later|off"
         "nowebcam|no webcam|blacklists uvcvideo|off"
+    )
+    tui_checklist extras "what goes on it?" "${items[@]}"
 }
 
 # one line per answer, with the leader dots the audit uses
