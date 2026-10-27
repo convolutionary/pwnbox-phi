@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────φ─────────────────────
+#  pwnbox·phi :: pwnbox-keys
+#  φ = 1.6180339887…   phi was here
+# ───────────────────────────────────────────────────────
+set -euo pipefail
+
+# the shortcut cheat sheet, on super + / or super + f1.
+#   pwnbox-keys        show it
+#   pwnbox-keys hint   one notification on the first login pointing here
+# keep in sync with dotfiles/config/hypr/hyprland.conf when binds change
+
+if [ "${1:-}" = hint ]; then
+    mark="${XDG_STATE_HOME:-$HOME/.local/state}/pwnbox/keys-hinted"
+    [ -e "$mark" ] && exit 0
+    mkdir -p "$(dirname "$mark")"
+    notify-send -a pwnbox "φ shortcuts" "Super + /  shows every shortcut. Alt + Space opens apps." || true
+    touch "$mark"
+    exit 0
+fi
+
+keys() {
+    cat <<'EOF'
+── apps ──────────────────────────────
+Alt + Space             app launcher
+Alt + T                 terminal (kitty)
+Alt + F                 browser (zen)
+Super + E               files
+Super + W               ranger in a terminal
+Alt + D                 discord (equibop)
+Alt + M                 music (cmus)
+── windows ───────────────────────────
+Alt + Z                 close window
+Super + F               fullscreen
+Super + Shift + F       maximize
+Super + T               float / tile
+Super + V               flip the split
+Super + arrows          focus window
+Super + Shift + arrows  move window
+Super + Ctrl + arrows   resize window
+Super + Ctrl + 1…9      split ratio 10…90%
+Super + drag            move (left) / resize (right)
+── workspaces ────────────────────────
+Alt + 1…0               go to workspace
+Super + 1…0             send window to workspace
+Ctrl + Alt + ← / →      previous / next workspace
+── system ────────────────────────────
+Super (tap)             control center
+Alt + S                 settings: theme, bar, fonts, scale
+Super + S               gnome settings
+Super + Escape          power menu
+Super + L               lock
+Super + Shift + Escape  panic: vpn kill switch, net off, lock
+Super + `               clipboard history
+Print                   screenshot to clipboard
+Super + Shift + S       screenshot a region
+Super + Shift + R       screenshot to a file
+Super + Alt + R         reload hyprland
+Super + Alt + Q         log out
+EOF
+}
+
+keys | rofi -dmenu -i -no-custom -p "φ shortcuts" -mesg "type to search" >/dev/null || true

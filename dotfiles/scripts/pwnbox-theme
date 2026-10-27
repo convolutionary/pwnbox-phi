@@ -3226,10 +3226,13 @@ custom_theme_dirs() {
 }
 
 theme_dir_of() {
-    local d
+    local d b
     for d in "$themes_dir"/*/; do
         [ -d "$d" ] || continue
-        [ "$(basename "${d%/}")" = "$1" ] && {
+        # case-insensitive: callers say Pwnbox, the folder is pwnbox. an exact
+        # match meant the default theme never applied
+        b="$(basename "${d%/}")"
+        [ "${b,,}" = "${1,,}" ] && {
             printf '%s' "${d%/}"
             return 0
         }
@@ -3494,7 +3497,7 @@ restore() {
         rm -f "$custom_state"
     fi
     if [ ! -f "$state" ] && [ ! -f "$cache/colors.json" ]; then
-        if dir="$(theme_dir_of Pwnbox)"; then
+        if dir="$(theme_dir_of Phi)" || dir="$(theme_dir_of Pwnbox)"; then
             do_custom "$dir" quiet && return 0
         fi
     fi
@@ -3937,7 +3940,14 @@ styles() {
 case "${1:-menu}" in
 menu) menu ;;
 pick | wallpaper) pick ;;
-custom | themes) custom ;;
+custom | themes)
+    if [ -n "${2:-}" ]; then
+        dir="$(theme_dir_of "$2")" || { echo "no theme called $2 in $themes_dir" >&2; exit 1; }
+        do_custom "$dir"
+    else
+        custom
+    fi
+    ;;
 monochrome) monochrome ;;
 apply) apply "${2:?usage: pwnbox-theme apply <image>}" ;;
 barstyle) barstyle ;;
@@ -3966,7 +3976,7 @@ restore) restore ;;
 usage: pwnbox-theme <command>
 
   pick, wallpaper          pick a wallpaper (pywal palette)
-  custom, themes           pick a fixed-palette theme
+  custom, themes [name]    pick a fixed-palette theme, or apply one by name
   monochrome               apply the built-in monochrome theme
   apply <image>            apply a wallpaper image
   barstyle                 pick a bar style

@@ -4,12 +4,12 @@ Each **subfolder** here that contains a `theme.conf` is a custom colour theme.
 It appears in the `ALT + S` settings menu under **THEME → Custom** as a
 thumbnail card: its wallpaper with the theme name below.
 
-A fresh installation starts with the `Pwnbox` theme; if its folder is missing,
+A fresh installation starts with the `Phi` theme (then `Pwnbox`); if neither folder exists,
 the built-in Monochrome palette is the fallback.
 
 ```
 dotfiles/themes/
-└── Pwnbox/                 # applied by default on a fresh installation
+└── Pwnbox/                 # the old default
     ├── theme.conf
     └── wallpaper.png
 ```

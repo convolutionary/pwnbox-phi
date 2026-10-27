@@ -8,7 +8,9 @@ lib.mkIf config.pwnbox.desktop.enable {
   programs.hyprland = {
     enable = true;
     xwayland.enable = true;
-    withUWSM = false;
+    # hyprland ships a "uwsm-managed" session either way, and without this
+    # its systemd units are missing and picking it in ly fails to start
+    withUWSM = true;
     systemd.setPath.enable = true;
   };
 
