@@ -29,7 +29,7 @@ libdir=$(dirname -- "$PHI_MARK")
 . "$libdir/phi-install-gpu"
 
 flake_src=${PHI_FLAKE:-/pwnbox}
-disk="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
+disk="" disk_summary="" wanted_extras="" failed_pkgs="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
 free_gib=0
 
 # --- arguments --------------------------------------------------------------
@@ -95,6 +95,13 @@ screen_welcome() {
     TUI_STEP=0
     firmware=${PHI_FIRMWARE:-$([ -d /sys/firmware/efi ] && echo uefi || echo bios)}
     ram=$(awk '/^MemTotal:/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo 2>/dev/null)
+    if [ -z "${PHI_DRY:-}" ] && [ "$(id -u)" -ne 0 ]; then
+        phi_die "needs root: sudo phi-install"
+    fi
+    # an earlier run that died halfway may still have the disk mounted and
+    # luks open. let go of that first, or the windows check below can't see
+    # windows and the kernel can't reload the partition table later
+    ops_release_leftovers
     tui_header
     phi_banner "a few questions, then it gets to work"
     phi_section "this machine"
@@ -107,9 +114,6 @@ screen_welcome() {
     [ -n "${PHI_DRY:-}" ] && say "mode       ${PHI_AMBER}dry run, nothing gets written${PHI_RESET}"
     printf '\n'
     [ -f "$flake_src/flake.nix" ] || phi_die "no flake.nix in $flake_src. boot the pwnbox-phi installer iso, or set PHI_FLAKE"
-    if [ -z "${PHI_DRY:-}" ] && [ "$(id -u)" -ne 0 ]; then
-        phi_die "needs root: sudo phi-install"
-    fi
     [ -n "$(tui_answer disk)" ] && return 0
     tui_footer "enter start   q quit"
     while :; do
@@ -124,6 +128,7 @@ screen_network() {
     local pick
     TUI_STEP=1
     [ -n "${PHI_SKIP_NET:-}" ] && return 0
+    rfkill unblock wifi 2>/dev/null
     while ! curl -fsI --max-time 6 https://cache.nixos.org >/dev/null 2>&1; do
         TUI_SCREEN=text_network
         tui_menu pick "no connection" \
@@ -132,7 +137,16 @@ screen_network() {
             "skip|carry on offline|only works if everything is already cached" \
             "quit|quit|nothing written yet"
         case "$pick" in
-        wifi) tui_suspend; nmtui; tui_resume ;;
+        wifi)
+            # laptops often come up with wifi soft-blocked, and then nmtui
+            # just shows an empty list
+            rfkill unblock wifi 2>/dev/null
+            nmcli radio wifi on 2>/dev/null
+            sleep 2
+            tui_suspend
+            nmtui connect
+            tui_resume
+            ;;
         skip) return 0 ;;
         quit) tui_quit ;;
         esac
@@ -152,6 +166,10 @@ screen_disk() {
     fi
     TUI_SCREEN=text_disk
     tui_menu disk "where does it go?" "${items[@]}"
+    # /dev/disk/by-id/... in an answers file -> /dev/nvme0n1
+    disk=$(readlink -f "$disk")
+    [ -b "$disk" ] || [ -n "${PHI_DRY:-}" ] || phi_die "$disk isn't a block device"
+    [ "$disk" = "$(ops_boot_disk)" ] && phi_die "$disk is the stick you booted from"
     screen_mode
 }
 text_disk() {
@@ -161,22 +179,37 @@ text_disk() {
 
 # only asks anything when the picked disk has windows on it
 screen_mode() {
-    local ans
+    local choice=""
     win_esp=$(dual_windows_on "$disk") || win_esp=""
     mode=wipe
     if [ -z "$win_esp" ]; then
         [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside, but there's no windows on $disk"
+        # no windows boot manager, but there's still something on it (a
+        # windows that lost its esp, an old linux, your data). say so now,
+        # not after it's gone
+        disk_summary=$(ops_disk_summary "$disk")
+        if [ -n "$disk_summary" ] && [ -z "$(tui_answer disk)" ]; then
+            TUI_SCREEN=text_nonempty
+            tui_menu choice "this disk isn't empty" \
+                "wipe|wipe it anyway|everything listed above goes" \
+                "back|pick another disk|" \
+                "quit|quit|nothing written yet"
+            case "$choice" in
+            back) PHI_ANS_DISK="" screen_disk ;;
+            quit) tui_quit ;;
+            esac
+        fi
         return 0
     fi
     free_gib=$(dual_free_gib "$disk")
     TUI_SCREEN=text_mode
     if [ "$firmware" != "uefi" ]; then
         [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside needs uefi, this machine booted bios"
-        tui_menu ans "windows is on this disk" \
+        tui_menu choice "windows is on this disk" \
             "wipe|wipe the whole disk|windows and everything else goes" \
             "back|pick another disk|" \
             "quit|quit|nothing written yet"
-        case "$ans" in
+        case "$choice" in
         back) PHI_ANS_DISK="" screen_disk ;;
         quit) tui_quit ;;
         esac
@@ -207,6 +240,27 @@ screen_mode() {
         esac
     done
 }
+# the partitions on the picked disk that hold something, as review rows
+summary_rows() {
+    local name fstype size label
+    while IFS=$'\t' read -r name fstype size label; do
+        [ -n "$name" ] || continue
+        printf '  %s%-16s%s %-8s %8s  %s\n' "$PHI_AMBER" "${name#/dev/}" "$PHI_RESET" "$fstype" "$size" "$label"
+    done <<<"$disk_summary"
+}
+text_nonempty() {
+    say "${PHI_AMBER}${disk#/dev/}${PHI_RESET} has this on it:"
+    printf '\n'
+    summary_rows
+    printf '\n'
+    case "$disk_summary" in
+    *ntfs* | *BitLocker* | *"Microsoft reserved"* | *"Basic data partition"*)
+        say "${PHI_RED}that looks like windows or windows data.${PHI_RESET} back up anything you want first."
+        printf '\n'
+        ;;
+    esac
+}
+
 text_mode() {
     say "windows boot manager is on ${PHI_GOLD}${win_esp#/dev/}${PHI_RESET}."
     if [ "$firmware" != "uefi" ]; then
@@ -280,6 +334,7 @@ screen_extras() {
         "libvirtd|libvirt / kvm|for vms|off"
         "wireshark|wireshark|and the wireshark group|off"
         "creative|creative apps|media and office|off"
+        "chatgpt|chatgpt desktop|breaks the build whenever openai ships an update|off"
         "gaming|gaming|steam and friends|off"
         "usbguard|usbguard|blocks usb devices plugged in later|off"
         "nowebcam|no webcam|blacklists uvcvideo|off"
@@ -300,17 +355,37 @@ text_review() {
         review_row "boot" "uefi, systemd-boot on ${win_esp#/dev/} + new 987 MiB xbootldr"
         review_row "boot menu" "pwnbox-phi and windows, 5 s to pick"
         review_row "clock" "hardware clock in local time, like windows"
+        local old_phi
+        old_phi=$(dual_old_phi_parts "$disk")
+        if [ -n "$old_phi" ]; then
+            # shellcheck disable=SC2086 # one pattern per partition
+            disk_summary=$(ops_disk_summary "$disk" | grep -F -f <(printf '%s\t\n' $old_phi))
+            printf '\n  %san earlier pwnbox-phi install on this disk gets erased:%s\n' "$PHI_RED" "$PHI_RESET"
+            summary_rows
+        fi
     else
         review_row "target" "${PHI_AMBER}$disk${PHI_RESET}  ${PHI_RED}(wiped)${PHI_RESET}"
         review_row "boot" "$firmware"
     fi
     review_row "encryption" "$encrypt"
     review_row "filesystem" "$fs"
+    if [ "$mode" != "alongside" ]; then
+        disk_summary=$(ops_disk_summary "$disk")
+        if [ -n "$disk_summary" ]; then
+            printf '\n  %sthis gets erased:%s\n' "$PHI_RED" "$PHI_RESET"
+            summary_rows
+        fi
+    fi
     phi_section "system"
     review_row "hostname" "$host"
     review_row "user" "$user ($fullname)"
     review_row "time zone" "$tz"
-    review_row "extras" "${extras:-none}"
+    local now later e
+    now=$(minimal_extras)
+    later=""
+    for e in $extras; do case " $now " in *" $e "*) ;; *) later+="$e " ;; esac; done
+    review_row "extras" "${now:-none}"
+    [ -n "$later" ] && review_row "after boot" "${later% }  ${PHI_DIM}(phi extras, the big download)${PHI_RESET}"
     review_row "flake" "/home/$user/pwnbox, host '$host'"
     printf '\n'
 }
@@ -387,11 +462,69 @@ screen_install() {
     phase "formatting" ops_format && phi_ok "formatted ($fs)"
     phase "mounting" ops_mount && phi_ok "mounted at $MNT"
     phase "copying the flake" ops_copy_flake && phi_ok "flake copied to /home/$user/pwnbox"
+    # the big extras (pentest toolset, docker, games...) are most of the
+    # download. they come after first boot with `phi extras`, so the stick
+    # only has to get a system that boots onto the disk
+    wanted_extras=$extras
+    extras=$(minimal_extras)
     phase "writing the host config" ops_write_host && phi_ok "hosts/$host written"
-    phase "nixos-install" tui_run "building and installing (this is the long one)" "$LOG" \
-        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --flake "$(ops_flake_dir)#$host"
+    phase "nixos-install" install_system
+    ops_copy_wifi && compgen -G "$MNT/etc/NetworkManager/system-connections/*.nmconnection" >/dev/null &&
+        phi_ok "wifi from the stick copied over, it connects at first boot"
     phase "setting your password" ops_set_password && phi_ok "password set for $user"
     phase "fixing ownership" ops_fix_owner
+}
+
+# the extras that are config, not big downloads. these go on from the stick,
+# the rest after first boot
+minimal_extras() {
+    local e out=""
+    for e in $extras; do
+        case "$e" in desktop | mullvad | nvidia | adaptive | performance | usbguard | nowebcam) out+="$e " ;; esac
+    done
+    printf '%s' "${out% }"
+}
+
+# nixos-install, and when it fails, a way forward instead of a dead end:
+# a smaller system that boots now, with the rest added after first boot
+install_system() {
+    local pick
+    while ! ops_nixos_install; do
+        # dry runs and answer files have nobody to ask
+        [ -n "${PHI_DRY:-}" ] && return 1
+        [ -n "$(tui_answer disk)" ] && return 1
+        failed_pkgs=$(ops_failed_pkgs)
+        TUI_SCREEN=text_install_failed
+        TUI_STEP=7
+        tui_menu pick "the build failed" \
+            "bare|install with no extras at all|console only, add everything after first boot" \
+            "retry|try again|if the connection dropped" \
+            "shell|drop to a shell|the target stays mounted at $MNT"
+        case "$pick" in
+        bare)
+            extras=""
+            ops_rewrite_host || return 1
+            ;;
+        shell)
+            tui_leave
+            exec bash
+            ;;
+        esac
+        tui_header
+        phi_section "installing"
+        printf '\n'
+    done
+}
+text_install_failed() {
+    if [ -n "$failed_pkgs" ]; then
+        say "what broke:"
+        printf '%s\n' "$failed_pkgs" | sed "s/^/    ${PHI_AMBER}/; s/\$/${PHI_RESET}/"
+        printf '\n'
+    fi
+    grep -q "hash mismatch in fixed-output derivation" "$LOG" 2>/dev/null &&
+        say "a download changed upstream (the app shipped a new version). nothing wrong with your machine."
+    say "nothing is lost: the disk stays set up. full log: ${PHI_GOLD}$LOG${PHI_RESET}"
+    printf '\n'
 }
 
 screen_done() {
@@ -416,6 +549,12 @@ text_done() {
     if [ "$mode" = "alongside" ]; then
         say "windows is in the boot menu. if a windows update ever puts itself first again,"
         say "pick ${PHI_GOLD}Linux Boot Manager${PHI_RESET} in your firmware's boot menu (often F12 or F8)."
+    fi
+    local later
+    later=$(ops_later_extras)
+    if [ -n "$later" ]; then
+        say "still to come: ${PHI_AMBER}$later${PHI_RESET}"
+        say "log in, get online, then run ${PHI_GOLD}phi extras${PHI_RESET}. that's the big download."
     fi
     say "after the first login: ${PHI_GOLD}phi-vpn login${PHI_RESET} to arm mullvad, ${PHI_GOLD}phi-audit${PHI_RESET} to see the grade."
     printf '\n'

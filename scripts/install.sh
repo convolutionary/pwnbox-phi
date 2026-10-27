@@ -197,25 +197,21 @@ run_to_file() {
 }
 
 banner() {
-    cat <<'EOF'
-                                                ____         ______
-|`````````, `.               .' |..          | |    ~.     .~      ~.   ``..      ..''
-|'''''''''    `.           .'   |  ``..      | |____.'_   |          |      ``..''
-|               `.   .   .'     |      ``..  | |       ~. |          |      ..'`..
-|                 `.' `.'       |          ``| |_______.'  `.______.'   ..''      ``..
-EOF
+    # the phi mark: golden spiral with the name beside it, same as phi-install
     if [ -f "$FLAKE_DIR/phi/bin/phi-mark" ]; then
         # shellcheck source=../phi/bin/phi-mark
         . "$FLAKE_DIR/phi/bin/phi-mark"
-        phi_rule 87
-        printf '%58s%s%s%s\n' '' "$PHI_AMBER" 'φ  phi edition  ·  1.6180339887…' "$PHI_RESET"
+        phi_banner "rebuilding the system"
+    else
+        printf '
+  φ  pwnbox·phi
+
+'
     fi
 }
 
 show_banner() {
-    printf '%s\n' "$C_BLUE$C_BOLD"
     banner
-    printf '%s\n' "$C_RESET"
 }
 
 help_screen() {

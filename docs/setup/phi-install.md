@@ -1,8 +1,9 @@
 # phi-install
 
 The pwnbox-phi installer ISO boots into `phi-install`, a full-screen
-installer that partitions a disk, writes a host config into the flake and
-runs `nixos-install`. The manual route in [ISOs](isos.md#installer-iso) still
+installer that partitions a disk, writes a host config into the flake,
+builds the system straight into the new disk's store and runs
+`nixos-install` for the bootloader. The manual route in [ISOs](isos.md#installer-iso) still
 works if you'd rather do it by hand.
 
 ## Build the ISO
@@ -36,9 +37,9 @@ other ISO (`dd`, Ventoy).
 | disk | which disk. Disks with Windows are marked, and picking one asks: next to Windows, or wipe. The USB stick you booted from isn't listed |
 | layout | encryption yes/no, ext4 or btrfs |
 | system | hostname, username, full name, time zone |
-| extras | desktop, pentest toolset, Mullvad, NVIDIA driver (if there's a card), adaptive power (laptops), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
+| extras | desktop, pentest toolset, Mullvad, ChatGPT (off by default), NVIDIA driver (if there's a card), adaptive power (laptops), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
 | review | everything on one screen. Installing means typing the disk name |
-| install | runs it all, with the live log tail on screen |
+| install | runs it all. The system build shows a progress bar (bytes downloaded, packages built, an estimate of the time left), what is building right now and its last output lines |
 | done | reboot, or stay with the new system mounted at `/mnt` |
 
 Keys: arrows or `j`/`k` to move, `space` to tick, `enter` to pick, `q` to
@@ -130,6 +131,9 @@ ticked. It writes `hosts/<hostname>/gpu.nix` with:
   `nvidia-offload <program>`. Bus IDs are read from `lspci` at install time
 - every NVIDIA module loaded at boot, because the hardening locks module
   loading afterwards and `nvidia_uvm` would otherwise miss its chance
+- the LTS kernel instead of the newest one. The driver builds out of tree
+  and lags new kernels: 595.71 fails on 7.2 (`strncpy` is gone). The LTS
+  kernel still supports RTX 50 and Zen 5. Without NVIDIA you get the newest
 
 On a laptop (anything with a battery) the extras list offers **adaptive
 power**, ticked: performance governor and turbo on the charger, powersave
@@ -156,6 +160,73 @@ goes through the installer script. Same for your user password, which
 - `hosts/<hostname>/hardware-configuration.nix` from `nixos-generate-config`
   (it picks up the LUKS device on its own)
 - `hosts/<hostname>/boot.nix`: systemd-boot on UEFI, GRUB on BIOS
+
+## If a step fails
+
+The installer stops at the first command that fails and says which step it
+was. The full log is at `/tmp/phi-install.log`. Running `sudo phi-install`
+again is safe:
+
+- whatever a failed run left behind (the target mounted at `/mnt`, the LUKS
+  container open) is released before any disk is scanned, so Windows is
+  still detected and the kernel can load the new partition table
+- next to Windows, the `PHI_XBOOT` / `PHI_ROOT` partitions from an earlier
+  attempt are removed and their space reused, so a rerun never piles up a
+  second pair. Windows' own partitions are never touched
+- partitions are found by the partuuid the installer gave them, never by
+  guessing their number
+- after partitioning, the installer checks that the kernel really loaded the
+  new table. If something still holds the disk, it stops there and says so,
+  instead of writing to partitions that don't exist
+
+The installer only puts a system that boots on the disk: the base, the
+desktop, Mullvad and the other extras that are just config (NVIDIA,
+power, USBGuard, no webcam). The big extras (pentest toolset, Docker,
+libvirt, Wireshark, creative, gaming, ChatGPT) are listed on the review
+screen under "after boot" and written to `hosts/<host>/later-extras`. Once
+you're logged in and online:
+
+```bash
+phi extras
+```
+
+switches them on in `hosts/<host>/default.nix` and rebuilds. Running it
+again when nothing is left says so and does nothing.
+
+With the default picks the installer downloads about 11.4 GiB from
+cache.nixos.org (34 GiB unpacked). Everything including the pentest
+toolset was 20.5 GiB, so `phi extras` brings the rest. Give the disk at
+least 100 GiB. Downloads run
+64 packages at a time. The few things that compile locally (unfree tools
+the binary cache can't ship, like Terraform, Vault and VeraCrypt, plus the
+patched kitty) get about 2 GiB of RAM per compiler process, so a laptop
+with little memory builds slower instead of running out of RAM.
+
+If the system build itself fails (usually an app whose download changed
+upstream), the installer shows which package broke and offers to install
+with no extras at all, so you always end up with a machine that boots.
+Everything you picked then waits in `hosts/<host>/later-extras` for
+`phi extras`.
+
+ChatGPT is an opt-in extra, off by default. OpenAI only publishes a "latest"
+download, so each OpenAI release breaks its pinned hash until the pin in
+`modules/nixos/packages.nix` is updated.
+
+Before a wipe, the review screen lists every partition that will be erased.
+If the disk isn't empty but has no Windows boot manager on it, you get a
+separate warning screen first.
+
+## Wifi
+
+On the stick, pick **connect to wifi** on the network screen. The installer
+unblocks the radio first, since many laptops start with it soft-blocked. The
+network you join is copied to the installed system, so it's online at first
+boot.
+
+On the installed system, `hardware.enableRedistributableFirmware` is on,
+because Intel, Realtek, MediaTek, Broadcom and Qualcomm cards all need
+firmware. The WPA2/WPA3 crypto modules are also loaded before
+`security.lockKernelModules` disables module loading.
 
 After the first boot, rebuild from the flake as usual:
 

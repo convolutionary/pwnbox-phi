@@ -1,18 +1,9 @@
 { pkgs, ... }:
-let
-  pkgs' = pkgs.extend (
-    final: prev: {
-      soapyuhd = prev.stdenvNoCC.mkDerivation {
-        pname = "soapyuhd";
-        version = "stub";
-        dontUnpack = true;
-        dontBuild = true;
-        installPhase = "mkdir -p $out";
-      };
-    }
-  );
-in
-with pkgs';
+# plain nixpkgs on purpose. stubbing out soapyuhd (to skip the uhd download)
+# changed the hash of soapysdr, and with it gqrx, sdrpp, rtl_433 and
+# gr-osmosdr, so all five compiled from source on every install instead of
+# coming from the binary cache
+with pkgs;
 [
   hackrf
   rtl-sdr

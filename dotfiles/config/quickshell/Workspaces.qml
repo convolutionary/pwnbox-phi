@@ -8,6 +8,8 @@ Item {
     id: root
     property bool vertical: false
     property int deskCount: 10
+    property color activeColor: Theme.fg
+    property color idleColor: Theme.fgFaint
 
     readonly property real dotSize: 8
     readonly property real dotSpacing: 6
@@ -53,8 +55,8 @@ Item {
             width: root.dotSize
             height: root.dotSize
             radius: root.dotSize / 2
-            color: ball.focused ? Theme.fg
-                                : (ball.hasWindows ? Theme.fgDim : Theme.fgFaint)
+            color: ball.focused ? root.activeColor
+                                : (ball.hasWindows ? Theme.fgDim : root.idleColor)
             scale: ball.focused ? 1.35 : 1.0
 
             Behavior on color {

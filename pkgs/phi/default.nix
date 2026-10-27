@@ -23,14 +23,16 @@
   iproute2,
   jq,
   libnotify,
+  lvm2,
   ncurses,
   parted,
+  procps,
   util-linux,
 }:
 let
   # mullvad, nmcli, rfkill and hyprlock come from the system PATH on purpose.
   # their own modules install them, and the mullvad cli has to match the daemon.
-  # same for nixos-install / nixos-enter / udevadm on the iso.
+  # same for nix / nixos-install / nixos-enter / udevadm on the iso.
   runtimeDeps = [
     bc
     coreutils
@@ -53,7 +55,9 @@ let
     dosfstools
     e2fsprogs
     gptfdisk
+    lvm2 # dmsetup, to close leftover luks/lvm mappings
     parted
+    procps # pkill, so ctrl-c during the build stops nix too
   ];
 in
 stdenvNoCC.mkDerivation {
@@ -70,6 +74,7 @@ stdenvNoCC.mkDerivation {
 
     install -Dm644 phi-mark $out/share/phi/phi-mark
     install -Dm644 phi-golden.awk $out/share/phi/phi-golden.awk
+    install -Dm644 phi-nix-progress.awk $out/share/phi/phi-nix-progress.awk
     install -Dm644 phi-tui $out/share/phi/phi-tui
     install -Dm644 phi-install-ops $out/share/phi/phi-install-ops
     install -Dm644 phi-install-dualboot $out/share/phi/phi-install-dualboot

@@ -12,6 +12,10 @@
 #   disk firmware mode encrypt fs host user fullname tz extras flake_src
 # and fills these in once the disk is partitioned:
 #   ESP_PART   the efi system partition (uefi only)
+#
+# every ops_* function returns non-zero the moment one of its commands
+# fails, so a step is never marked done when it wasn't. partitions are found
+# by the partuuid we gave them, never by guessing their number
 #   BOOT_PART  where kernels go: the esp on a wiped uefi disk, a fresh
 #              xbootldr partition next to windows, ext4 /boot on bios
 #   ROOT_PART  the partition that becomes / (or holds luks)
@@ -27,14 +31,6 @@ run() {
     fi
     printf '$ %s\n' "$*" >>"$LOG"
     "$@" >>"$LOG" 2>&1
-}
-
-# nvme0n1 -> nvme0n1p2, sda -> sda2
-part() {
-    case "$disk" in
-    *[0-9]) printf '%sp%s' "$disk" "$1" ;;
-    *) printf '%s%s' "$disk" "$1" ;;
-    esac
 }
 
 # the stick we booted from shouldn't be offered as a target
@@ -55,10 +51,154 @@ ops_disk_items() {
     while IFS=$'\t' read -r name size tran model; do
         [ "$name" = "$boot" ] && continue
         tag=""
-        dual_windows_on "$name" >/dev/null && tag="  · windows"
+        if dual_windows_on "$name" >/dev/null; then
+            tag="  · windows"
+        elif [ -n "$(ops_disk_summary "$name")" ]; then
+            tag="  · has data"
+        fi
         printf '%s|%s|%s  %s %s%s\n' "$name" "${name#/dev/}" "$size" "$tran" "$model" "$tag"
     done < <(lsblk -J -dnpo NAME,SIZE,TRAN,MODEL -e 1,7,11 2>/dev/null |
         jq -r '.blockdevices[] | [.name, .size, (.tran // ""), (.model // "" | gsub("\\s+$"; ""))] | @tsv')
+}
+
+# a fresh random uuid, or a readable placeholder in dry runs
+ops_uuid() {
+    if [ -n "${PHI_DRY:-}" ]; then
+        printf '%s' "${1}0000000-0000-4000-8000-000000000000"
+        return
+    fi
+    cat /proc/sys/kernel/random/uuid
+}
+
+# the partitions the kernel has for DISK right now, as /dev paths
+ops_disk_parts() {
+    lsblk -lnpo NAME,TYPE "$1" 2>/dev/null | awk '$2 == "part" { print $1 }'
+}
+
+# unmount everything at PATH or below it, deepest first
+ops_umount_under() {
+    local t
+    while read -r t; do
+        [ -n "$t" ] || continue
+        # no lazy unmount: it "succeeds" while the device stays open, and
+        # the kernel then keeps the old partition. busy means stop here
+        run umount "$t" || return 1
+    done < <(findmnt -rno TARGET 2>/dev/null | awk -v m="$1" '$0 == m || index($0, m "/") == 1' | sort -r)
+}
+
+# frees one block device (kernel name: nvme0n1p2, dm-0): whatever is stacked
+# on it first (luks, lvm), then its own mounts and swap, then the mapping
+ops_release_blk() {
+    local name=$1 h dm="" mp
+    [ -e "/sys/class/block/$name" ] || return 0
+    for h in /sys/class/block/"$name"/holders/*; do
+        [ -e "$h" ] || continue
+        ops_release_blk "${h##*/}" || return 1
+    done
+    dm=$(cat "/sys/class/block/$name/dm/name" 2>/dev/null || true)
+    # btrfs shows up as /dev/x[/@], so the [..] part is cut off before comparing
+    while read -r mp; do
+        [ -n "$mp" ] && { ops_umount_under "$mp" || return 1; }
+    done < <(findmnt -rno SOURCE,TARGET 2>/dev/null |
+        awk -v a="/dev/$name" -v b="/dev/mapper/$dm" '{ sub(/\[.*\]$/, "", $1) } $1 == a || ($1 == b && b != "/dev/mapper/") { print $2 }')
+    if awk 'NR > 1 { print $1 }' /proc/swaps 2>/dev/null | grep -qxF -e "/dev/$name" -e "/dev/mapper/$dm"; then
+        run swapoff "/dev/$name" || return 1
+    fi
+    [ -n "$dm" ] && { run dmsetup remove --retry "$dm" || return 1; }
+    return 0
+}
+
+# a run that died halfway leaves the target mounted at $MNT and the luks
+# container open. that used to keep the old partitions busy (so the kernel
+# never saw the new ones) and hide windows' esp from the windows check.
+# nothing gets erased here, it only lets go
+ops_release_leftovers() {
+    [ -n "${PHI_DRY:-}" ] && return 0
+    ops_umount_under "$MNT" >/dev/null 2>&1
+    [ -e /dev/mapper/phiroot ] && ops_release_blk "$(basename "$(readlink -f /dev/mapper/phiroot)")" >/dev/null 2>&1
+    return 0
+}
+
+# frees every partition on DISK. only called once you've typed the disk name
+ops_release_disk() {
+    local p
+    for p in $(ops_disk_parts "$1"); do
+        ops_release_blk "${p#/dev/}" || {
+            echo "something on $p is still in use. close it (or reboot the stick) and run phi-install again" >>"$LOG"
+            return 1
+        }
+    done
+    ops_release_blk "${1#/dev/}"
+}
+
+# true when the kernel's partitions match what's on the disk. compared by
+# number, start and size (all in 512-byte sectors)
+ops_table_matches() {
+    local d=$1 n=${1#/dev/} want have s
+    want=$(partx -g -o NR,START,SECTORS "$d" 2>/dev/null | awk '{ print $1, $2, $3 }' | sort)
+    have=$(for s in /sys/class/block/"$n"/*/partition; do
+        [ -e "$s" ] || continue
+        printf '%s %s %s\n' "$(cat "$s")" "$(cat "${s%/partition}/start")" "$(cat "${s%/partition}/size")"
+    done | sort)
+    [ -n "$want" ] && [ "$want" = "$have" ]
+}
+
+# makes the kernel load the new table, and checks it really did. partprobe
+# can half-succeed when a partition is busy: it drops the free ones, keeps
+# the busy one, and the new p2 never appears. that was the old
+# "Device /dev/nvme0n1p2 does not exist"
+ops_reread() {
+    local d=$1 i
+    if [ -n "${PHI_DRY:-}" ]; then
+        run partprobe "$d"
+        run udevadm settle
+        return 0
+    fi
+    for i in 1 2 3 4 5; do
+        run partprobe "$d" || run blockdev --rereadpt "$d" || run partx -u "$d"
+        run udevadm settle --timeout=15
+        ops_table_matches "$d" && return 0
+        sleep 1
+    done
+    {
+        echo "the kernel kept the old partition table for $d. something still has it open."
+        echo "on disk:"
+        partx -s "$d"
+        echo "kernel:"
+        lsblk "$d"
+    } >>"$LOG" 2>&1
+    return 1
+}
+
+# the partition on DISK with partuuid UUID, as /dev/nvme0n1p2. waits for
+# udev's /dev/disk/by-partuuid link, and probes the partitions directly when
+# udev is slow or not running, so a missing symlink can't stall the install
+ops_part_by_uuid() {
+    local d=$1 u=$2 i p n=${1#/dev/}
+    if [ -n "${PHI_DRY:-}" ]; then
+        printf '/dev/disk/by-partuuid/%s' "$u"
+        return 0
+    fi
+    for i in $(seq 40); do
+        if [ -e "/dev/disk/by-partuuid/$u" ]; then
+            readlink -f "/dev/disk/by-partuuid/$u"
+            return 0
+        fi
+        for p in /sys/class/block/"$n"/*/partition; do
+            [ -e "$p" ] || continue
+            p=${p%/partition}
+            p=/dev/${p##*/}
+            [ -b "$p" ] || continue
+            if [ "$(blkid -p -o value -s PART_ENTRY_UUID "$p" 2>/dev/null)" = "$u" ]; then
+                printf '%s' "$p"
+                return 0
+            fi
+        done
+        udevadm settle --timeout=2 >/dev/null 2>&1
+        sleep 0.25
+    done
+    echo "no partition with partuuid $u showed up on $d" >>"$LOG"
+    return 1
 }
 
 # wiping the whole disk.
@@ -66,23 +206,37 @@ ops_disk_items() {
 # bios: 1 = grub stub, 2 = /boot, 3 = root. grub can't unlock luks2 with
 # argon2id, so /boot has to sit outside the encrypted part on bios too
 ops_partition_wipe() {
-    local root_type=8300
+    local root_type=8300 p a b c
     [ "$encrypt" = "yes" ] && root_type=8309
-    run wipefs -af "$disk"
-    run sgdisk --zap-all "$disk"
+    ops_release_disk "$disk" || return 1
+    # old signatures first (luks headers, ntfs, swap), so nothing stale gets
+    # picked up later, then the table itself
+    for p in $(ops_disk_parts "$disk"); do
+        run wipefs -af "$p" || return 1
+    done
+    run wipefs -af "$disk" || return 1
+    run sgdisk --zap-all "$disk" || true # complains on an already-blank disk
+    run sgdisk -o "$disk" || return 1
+    a=$(ops_uuid a) b=$(ops_uuid b) c=$(ops_uuid c)
     if [ "$firmware" = "uefi" ]; then
         # 987 MiB: big enough for a pile of generations, and a fibonacci number
-        run sgdisk -n1:1MiB:+987MiB -t1:ef00 -c1:PHI_EFI \
-            -n2:0:0 -t2:"$root_type" -c2:PHI_ROOT "$disk"
-        ESP_PART=$(part 1) BOOT_PART=$(part 1) ROOT_PART=$(part 2)
+        run sgdisk -n1:1MiB:+987MiB -t1:ef00 -c1:PHI_EFI -u1:"$a" \
+            -n2:0:0 -t2:"$root_type" -c2:PHI_ROOT -u2:"$b" "$disk" || return 1
+        ops_reread "$disk" || return 1
+        ESP_PART=$(ops_part_by_uuid "$disk" "$a") || return 1
+        BOOT_PART=$ESP_PART
+        ROOT_PART=$(ops_part_by_uuid "$disk" "$b") || return 1
     else
-        run sgdisk -n1:1MiB:+1MiB -t1:ef02 -c1:PHI_BIOS \
-            -n2:0:+987MiB -t2:8300 -c2:PHI_BOOT \
-            -n3:0:0 -t3:"$root_type" -c3:PHI_ROOT "$disk"
-        BOOT_PART=$(part 2) ROOT_PART=$(part 3)
+        run sgdisk -n1:1MiB:+1MiB -t1:ef02 -c1:PHI_BIOS -u1:"$a" \
+            -n2:0:+987MiB -t2:8300 -c2:PHI_BOOT -u2:"$b" \
+            -n3:0:0 -t3:"$root_type" -c3:PHI_ROOT -u3:"$c" "$disk" || return 1
+        ops_reread "$disk" || return 1
+        BOOT_PART=$(ops_part_by_uuid "$disk" "$b") || return 1
+        ROOT_PART=$(ops_part_by_uuid "$disk" "$c") || return 1
     fi
-    run partprobe "$disk"
-    run udevadm settle
+    # a new partition can start where an old luks header or filesystem was
+    run wipefs -af "$BOOT_PART" || return 1
+    run wipefs -af "$ROOT_PART" || return 1
 }
 
 ops_partition() {
@@ -91,6 +245,41 @@ ops_partition() {
     else
         ops_partition_wipe
     fi
+}
+
+# every partition on DISK, probed straight off the disk (not udev's cache,
+# which can be stale or missing). one line per partition:
+#   name<TAB>fstype<TAB>size<TAB>label<TAB>parttype guid<TAB>partition name
+# (a missing value is "-")
+ops_probe_parts() {
+    local d=$1 n=${1#/dev/} nr start ptype pname p s TYPE LABEL size
+    # partition type + name from the table itself, filesystem from blkid
+    while read -r nr start ptype pname; do
+        p=""
+        # same number and same start, so a stale kernel table can't point
+        # us at the wrong device
+        for s in /sys/class/block/"$n"/*/partition; do
+            [ -e "$s" ] && [ "$(cat "$s")" = "$nr" ] && [ "$(cat "${s%/partition}/start")" = "$start" ] &&
+                { s=${s%/partition}; p=/dev/${s##*/}; break; }
+        done
+        [ -n "$p" ] || continue
+        TYPE=$(blkid -p -o value -s TYPE "$p" 2>/dev/null || true)
+        LABEL=$(blkid -p -o value -s LABEL "$p" 2>/dev/null || true)
+        size=$(lsblk -dno SIZE "$p" 2>/dev/null | tr -d ' ')
+        # no empty fields: read with IFS=tab would merge them and shift columns
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "${TYPE:--}" "${size:--}" "${LABEL:--}" "${ptype,,}" "${pname:--}"
+    done < <(partx -g -o NR,START,TYPE,NAME "$d" 2>/dev/null)
+}
+
+# what's on DISK now, one "name<TAB>fstype<TAB>size<TAB>label" line per
+# partition that holds something. the review screen shows it before a wipe
+ops_disk_summary() {
+    local name fstype size label ptype pname
+    while IFS=$'\t' read -r name fstype size label ptype pname; do
+        [ "$fstype" = "-" ] && [ "$pname" = "-" ] && continue
+        [ "$label" = "-" ] && label=$pname
+        printf '%s\t%s\t%s\t%s\n' "$name" "$fstype" "$size" "$label"
+    done < <(ops_probe_parts "$1")
 }
 
 # luks2 with argon2id (cryptsetup's default for luks2, spelled out so
@@ -107,9 +296,23 @@ ops_encrypt() {
     tui_suspend
     printf '\n  %sφ%s pick a disk passphrase. you type it at every boot, so make it one you remember.\n\n' \
         "$PHI_AMBER" "$PHI_RESET"
-    cryptsetup luksFormat "${LUKS_ARGS[@]}" --batch-mode --verify-passphrase "$ROOT_PART" || return 1
+    local i
+    # a typo in the second prompt shouldn't end the install, so three goes
+    for i in 1 2 3; do
+        cryptsetup luksFormat "${LUKS_ARGS[@]}" --batch-mode --verify-passphrase "$ROOT_PART" && break
+        [ "$i" -eq 3 ] && return 1
+        printf '\n  %s!%s that didn'"'"'t take (typo in the second one?). again:\n\n' "$PHI_AMBER" "$PHI_RESET"
+    done
+    if [ -e /dev/mapper/phiroot ]; then
+        echo "/dev/mapper/phiroot is already open (from another disk?). close it: cryptsetup close phiroot" | tee -a "$LOG"
+        return 1
+    fi
     printf '\n  %sφ%s same passphrase once more to unlock it now\n\n' "$PHI_AMBER" "$PHI_RESET"
-    cryptsetup open "$ROOT_PART" phiroot || return 1
+    for i in 1 2 3; do
+        cryptsetup open "$ROOT_PART" phiroot && break
+        [ "$i" -eq 3 ] && return 1
+        printf '\n  %s!%s wrong passphrase, again:\n\n' "$PHI_AMBER" "$PHI_RESET"
+    done
     tui_resume
 }
 
@@ -122,43 +325,46 @@ ops_format() {
     root=$(ops_root_dev)
     if [ "$mode" = "alongside" ]; then
         # windows' esp is left exactly as it is. only the new xbootldr gets made
-        run mkfs.fat -F32 -n PHI_XBOOT "$BOOT_PART"
+        run mkfs.fat -F32 -n PHI_XBOOT "$BOOT_PART" || return 1
     elif [ "$firmware" = "uefi" ]; then
-        run mkfs.fat -F32 -n PHI_EFI "$BOOT_PART"
+        run mkfs.fat -F32 -n PHI_EFI "$BOOT_PART" || return 1
     else
-        run mkfs.ext4 -F -L PHI_BOOT "$BOOT_PART"
+        run mkfs.ext4 -F -L PHI_BOOT "$BOOT_PART" || return 1
     fi
     if [ "$fs" = "btrfs" ]; then
-        run mkfs.btrfs -f -L phiroot "$root"
-        run mount "$root" "$MNT"
-        for sv in @ @home @nix; do run btrfs subvolume create "$MNT/$sv"; done
-        run umount "$MNT"
+        run mkfs.btrfs -f -L phiroot "$root" || return 1
+        run mount "$root" "$MNT" || return 1
+        for sv in @ @home @nix; do
+            run btrfs subvolume create "$MNT/$sv" || { run umount "$MNT"; return 1; }
+        done
+        run umount "$MNT" || return 1
     else
-        run mkfs.ext4 -F -L phiroot "$root"
+        run mkfs.ext4 -F -L phiroot "$root" || return 1
     fi
 }
 
 ops_mount() {
     local root opts="noatime,compress=zstd"
     root=$(ops_root_dev)
+    run mkdir -p "$MNT" || return 1
     if [ "$fs" = "btrfs" ]; then
-        run mount -o "subvol=@,$opts" "$root" "$MNT"
-        run mkdir -p "$MNT/home" "$MNT/nix"
-        run mount -o "subvol=@home,$opts" "$root" "$MNT/home"
-        run mount -o "subvol=@nix,$opts" "$root" "$MNT/nix"
+        run mount -o "subvol=@,$opts" "$root" "$MNT" || return 1
+        run mkdir -p "$MNT/home" "$MNT/nix" || return 1
+        run mount -o "subvol=@home,$opts" "$root" "$MNT/home" || return 1
+        run mount -o "subvol=@nix,$opts" "$root" "$MNT/nix" || return 1
     else
-        run mount "$root" "$MNT"
+        run mount "$root" "$MNT" || return 1
     fi
-    run mkdir -p "$MNT/boot"
+    run mkdir -p "$MNT/boot" || return 1
     if [ "$mode" = "alongside" ]; then
         # systemd-boot goes on windows' esp at /efi, kernels on xbootldr at /boot
-        run mkdir -p "$MNT/efi"
-        run mount -o umask=0077 "$ESP_PART" "$MNT/efi"
-        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot"
+        run mkdir -p "$MNT/efi" || return 1
+        run mount -o umask=0077 "$ESP_PART" "$MNT/efi" || return 1
+        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot" || return 1
     elif [ "$firmware" = "uefi" ]; then
-        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot"
+        run mount -o umask=0077 "$BOOT_PART" "$MNT/boot" || return 1
     else
-        run mount "$BOOT_PART" "$MNT/boot"
+        run mount "$BOOT_PART" "$MNT/boot" || return 1
     fi
 }
 
@@ -166,21 +372,39 @@ ops_mount() {
 # writable copy in the user's home so ./scripts/install.sh works from there
 ops_flake_dir() { printf '%s/home/%s/pwnbox' "$MNT" "$user"; }
 
+# /pwnbox on the iso is a symlink into the store. plain cp -r copies the
+# link itself instead of what it points to, which is what broke this step
+# before, so the source gets resolved first and the result gets checked
 ops_copy_flake() {
-    local dst
+    local dst src
     dst=$(ops_flake_dir)
-    run mkdir -p "$dst"
-    run cp -rT --no-preserve=mode,ownership "$flake_src" "$dst"
-    run chmod -R u+w "$dst"
+    src=$(readlink -f "$flake_src") || return 1
+    run mkdir -p "$dst" || return 1
+    run cp -rT --no-preserve=mode,ownership "$src" "$dst" || return 1
+    run chmod -R u+w "$dst" || return 1
+    # from a git checkout (PHI_FLAKE=~/pwnbox-phi): nix ignores files git
+    # doesn't track, which would hide the hosts/<host> folder written next
+    run rm -rf "$dst/.git" "$dst/result" || return 1
+    [ -n "${PHI_DRY:-}" ] || [ -f "$dst/flake.nix" ] || { echo "no flake.nix in $dst after the copy" >>"$LOG"; return 1; }
 }
 
 has() { case " $extras " in *" $1 "*) echo true ;; *) echo false ;; esac }
+
+# what was picked but isn't in this build: the big extras, or everything
+# after a bare retry. `phi extras` turns these on after first boot
+ops_later_extras() {
+    local e out=""
+    for e in ${wanted_extras:-}; do
+        case " $extras " in *" $e "*) ;; *) out+="$e " ;; esac
+    done
+    printf '%s' "${out% }"
+}
 
 # hosts/<host>/default.nix, in the same shape as hosts/nixos/default.nix
 ops_host_nix() {
     cat <<EOF
 # written by phi-install on $(date +%F). edit freely, rebuild with
-# ./scripts/install.sh switch
+# ./scripts/install.sh switch$([ -n "$(ops_later_extras)" ] && printf '\n#\n# installed without these, they come after first boot:\n#   %s\n# `phi extras` switches them on below and rebuilds' "$(ops_later_extras)")
 { pkgs, ... }:
 {
   imports = [
@@ -211,6 +435,7 @@ ops_host_nix() {
       hacking = $(has hacking);
       gaming = $(has gaming);
       creative = $(has creative);
+      chatgpt = $(has chatgpt);
     };
 
     phi.hardening = {
@@ -219,9 +444,16 @@ ops_host_nix() {
     };
   };
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.kernelPackages = pkgs.$(ops_kernel);
 }
 EOF
+}
+
+# newest kernel, except with the nvidia driver: it builds out of tree and
+# lags new kernels. 595.71 doesn't build on 7.2 (strncpy is gone), so nvidia
+# machines get the lts kernel, which still knows rtx 50 and zen 5
+ops_kernel() {
+    if [ "$(has nvidia)" = true ]; then echo linuxPackages; else echo linuxPackages_latest; fi
 }
 
 ops_boot_nix() {
@@ -266,8 +498,87 @@ ops_write_host() {
     fi
     ops_host_nix >"$dir/default.nix"
     ops_boot_nix >"$dir/boot.nix"
+    ops_write_later "$dir"
     [ "$(has nvidia)" = true ] && gpu_nix >"$dir/gpu.nix"
     return 0
+}
+
+# "jobs cores" for nix. max-jobs=auto with cores=0 lets every build use
+# every core at once: 32 compilers on a 16 GiB laptop, and the oom killer
+# takes nix down mid-install. this budgets ~2 GiB per compiler process,
+# at most 4 builds side by side, the cores split between them. downloads
+# aren't affected, those go by max-substitution-jobs
+ops_build_slots() {
+    local ncpu memg procs jobs
+    ncpu=$(nproc 2>/dev/null || echo 2)
+    memg=$(awk '/^MemTotal:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null)
+    procs=$((${memg:-4} / 2))
+    [ "$procs" -gt "$ncpu" ] && procs=$ncpu
+    [ "$procs" -lt 1 ] && procs=1
+    jobs=$((procs < 4 ? procs : 4))
+    echo "$jobs $((procs / jobs))"
+}
+
+# the system gets built here instead of inside nixos-install, so the build
+# can report real progress. same build nixos-install --flake does (straight
+# into the target's store, reusing whatever the stick already has), then
+# nixos-install --system only sets the profile and the bootloader.
+#
+# speed: nix fetches 16 paths at a time by default and a full install is
+# ~5000 of them, mostly small, so the download sits idle between requests.
+# 64 at once keeps the line busy. fallback: if a prebuilt package can't be
+# downloaded, build it instead of giving up
+ops_nixos_install() {
+    local tmp sys jobs cores
+    read -r jobs cores < <(ops_build_slots)
+    # 0700 at the top of the target, like nixos-install does it. nix won't
+    # build under a world-writable dir, so not $MNT/tmp
+    tmp=$(mktemp -d -p "$MNT" .phi-install.XXXXXX) || return 1
+    # builds go on the target disk. the live system's / is ram, and a big
+    # build in there runs the stick out of memory halfway through
+    mkdir -p "$tmp/build" 2>/dev/null
+    TMPDIR=$tmp/build tui_nix "downloading and building the system" "$LOG" \
+        nix --extra-experimental-features "nix-command flakes" build \
+        --store "$MNT" --extra-substituters "auto?trusted=1" \
+        --out-link "$tmp/system" \
+        --max-jobs "$jobs" --cores "$cores" \
+        --option max-substitution-jobs 64 --option http-connections 64 \
+        --option download-attempts 5 --option connect-timeout 15 \
+        --option fallback true --option build-dir "$tmp/build" \
+        "$(ops_flake_dir)#nixosConfigurations.\"$host\".config.system.build.toplevel" || return 1
+    if [ -n "${PHI_DRY:-}" ]; then
+        sys=/nix/store/...-nixos-system-$host
+    else
+        sys=$(readlink "$tmp/system") || { echo "nix build left no system at $tmp/system" >>"$LOG"; return 1; }
+    fi
+    tui_run "installing the bootloader" "$LOG" \
+        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --system "$sys" || return 1
+    rm -rf "$tmp"
+}
+
+# rewrites hosts/<host>/default.nix for the current $extras, keeping the
+# hardware config that's already there
+ops_rewrite_host() {
+    ops_host_nix >"$(ops_flake_dir)/hosts/$host/default.nix"
+    ops_write_later "$(ops_flake_dir)/hosts/$host"
+}
+
+# one extra per line, read by `phi extras` on the installed system
+ops_write_later() {
+    local later
+    later=$(ops_later_extras)
+    if [ -n "$later" ]; then
+        # shellcheck disable=SC2086 # one per line on purpose
+        printf '%s\n' $later >"$1/later-extras"
+    else
+        rm -f "$1/later-extras"
+    fi
+}
+
+# names of the packages that broke the last build, from the log
+ops_failed_pkgs() {
+    grep -oE "(hash mismatch in fixed-output derivation|Cannot build|builder for) '/nix/store/[a-z0-9]{32}-[^']+\.drv'" "$LOG" 2>/dev/null |
+        sed -E "s|.*/nix/store/[a-z0-9]{32}-||; s|\.drv'\$||" | awk '!seen[$0]++' | head -n 5
 }
 
 # passwd prompts on the real terminal; the password never touches this script
@@ -276,20 +587,41 @@ ops_set_password() {
         run nixos-enter --root "$MNT" -c "passwd $user"
         return 0
     fi
+    local tries=0
     tui_suspend
     printf '\n  %sφ%s password for %s%s%s (you log in and sudo with this)\n\n' "$PHI_AMBER" "$PHI_RESET" "$PHI_BOLD" "$user" "$PHI_RESET"
-    until nixos-enter --root "$MNT" -c "passwd $user"; do
+    # by path: nixos-enter keeps the caller's PATH, which only finds passwd
+    # inside the target by luck. and a limit, so a passwd that can't run
+    # ends on the failure screen instead of asking forever
+    until nixos-enter --root "$MNT" -c "/nix/var/nix/profiles/system/sw/bin/passwd $user"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 5 ]; then
+            tui_resume
+            return 1
+        fi
         printf '\n  %s!%s that didn'"'"'t take, try again\n\n' "$PHI_AMBER" "$PHI_RESET"
     done
     tui_resume
 }
 
 ops_fix_owner() {
-    run nixos-enter --root "$MNT" -c "chown -R $user:users /home/$user/pwnbox"
+    run nixos-enter --root "$MNT" -c "/nix/var/nix/profiles/system/sw/bin/chown -R $user:users /home/$user/pwnbox"
+}
+
+# the wifi you joined on the stick (nmtui) comes along, so the new system
+# is online at first boot without typing the password again. never fatal
+ops_copy_wifi() {
+    local src=/etc/NetworkManager/system-connections dst="$MNT/etc/NetworkManager/system-connections"
+    compgen -G "$src/*.nmconnection" >/dev/null || return 0
+    run mkdir -p "$dst" || return 0
+    run cp -- "$src"/*.nmconnection "$dst/" || return 0
+    run chmod 700 "$dst" || return 0
+    run chmod 600 "$dst"/*.nmconnection || return 0
+    return 0
 }
 
 ops_unmount() {
-    run umount -R "$MNT"
-    [ "$encrypt" = "yes" ] && run cryptsetup close phiroot
+    ops_umount_under "$MNT"
+    [ "$encrypt" = "yes" ] && [ -e /dev/mapper/phiroot ] && run cryptsetup close phiroot
     return 0
 }

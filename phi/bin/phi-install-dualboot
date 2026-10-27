@@ -40,16 +40,23 @@ dual_windows_on() {
     fi
     [ "$(id -u)" -eq 0 ] || { DUAL_ESP_CACHE[$d]=""; return 1; }
     while read -r esp; do
-        mp=$(mktemp -d)
-        # read-only, and unmounted straight after. windows never notices
-        if mount -o ro "$esp" "$mp" 2>/dev/null; then
+        # already mounted (a run that died halfway leaves it at /mnt/efi):
+        # look there. mounting it a second time read-only fails, and that
+        # used to make windows invisible to a second run
+        mp=$(findmnt -rno TARGET -S "$esp" 2>/dev/null | head -n1)
+        if [ -n "$mp" ]; then
             find "$mp" -maxdepth 4 -ipath '*/efi/microsoft/boot/bootmgfw.efi' 2>/dev/null | grep -q . && found=$esp
-            umount "$mp"
+        else
+            mp=$(mktemp -d)
+            # read-only, and unmounted straight after. windows never notices
+            if mount -o ro "$esp" "$mp" 2>/dev/null; then
+                find "$mp" -maxdepth 4 -ipath '*/efi/microsoft/boot/bootmgfw.efi' 2>/dev/null | grep -q . && found=$esp
+                umount "$mp"
+            fi
+            rmdir "$mp"
         fi
-        rmdir "$mp"
         [ -n "$found" ] && break
-    done < <(lsblk -J -po NAME,PARTTYPE "$d" 2>/dev/null |
-        jq -r --arg g "$ESP_GUID" '.. | objects | select(.parttype? == $g) | .name')
+    done < <(ops_probe_parts "$d" | awk -F'\t' -v g="$ESP_GUID" '$5 == g { print $1 }')
     DUAL_ESP_CACHE[$d]=$found
     [ -n "$found" ] && { printf '%s' "$found"; return 0; }
     return 1
@@ -74,19 +81,43 @@ dual_bitlocker() {
         [ "${PHI_FAKE_WINDOWS##*:}" = "yes" ]
         return
     fi
-    lsblk -no FSTYPE "$disk" 2>/dev/null | grep -qi bitlocker
+    ops_probe_parts "$disk" | cut -f2 | grep -qi bitlocker
 }
 
-# size of the largest unpartitioned block on DISK, in whole GiB
+# partitions an earlier phi-install made next to windows, found by name.
+# a rerun gives their space back instead of piling up another pair
+dual_old_phi_parts() {
+    [ -n "${PHI_FAKE_WINDOWS:-}" ] && return 0
+    ops_probe_parts "$1" | awk -F'\t' '$6 == "PHI_XBOOT" || $6 == "PHI_ROOT" { print $1 }'
+}
+
+# size of the largest unpartitioned block on DISK, in whole GiB, as it will
+# be once an earlier attempt's partitions are gone. worked out on a copy of
+# the partition table in a sparse file, so nothing is guessed
 dual_free_gib() {
-    local d=$1 first last ss
+    local d=$1 tbl img first last ss bytes p n dels=()
     if [ -n "${PHI_FAKE_FREE_GIB:-}" ]; then
         printf '%s' "$PHI_FAKE_FREE_GIB"
         return
     fi
-    first=$(sgdisk -F "$d" 2>/dev/null | tail -n1)
-    last=$(sgdisk -E "$d" 2>/dev/null | tail -n1)
     ss=$(blockdev --getss "$d" 2>/dev/null || echo 512)
+    img=$d
+    for p in $(dual_old_phi_parts "$d"); do
+        n=$(cat "/sys/class/block/${p#/dev/}/partition" 2>/dev/null) && dels+=(-d "$n")
+    done
+    if [ "${#dels[@]}" -gt 0 ]; then
+        tbl=$(mktemp) img=$(mktemp)
+        bytes=$(blockdev --getsize64 "$d" 2>/dev/null || echo 0)
+        if sgdisk -b "$tbl" "$d" >/dev/null 2>&1 && truncate -s "$bytes" "$img" &&
+            sgdisk -l "$tbl" "$img" >/dev/null 2>&1 && sgdisk "${dels[@]}" "$img" >/dev/null 2>&1; then
+            :
+        else
+            img=$d
+        fi
+    fi
+    first=$(sgdisk -F "$img" 2>/dev/null | tail -n1)
+    last=$(sgdisk -E "$img" 2>/dev/null | tail -n1)
+    [ "$img" != "$d" ] && rm -f "$img" "$tbl"
     if ! [[ "$first" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || [ "$last" -le "$first" ]; then
         printf '0'
         return
@@ -94,14 +125,7 @@ dual_free_gib() {
     printf '%s' $(((last - first + 1) * ss / 1073741824))
 }
 
-dual_uuid() {
-    if [ -n "${PHI_DRY:-}" ]; then
-        # stable placeholders keep dry-run output readable
-        printf '%s' "${1}0000000-0000-4000-8000-000000000000"
-        return
-    fi
-    cat /proc/sys/kernel/random/uuid
-}
+dual_uuid() { ops_uuid "$@"; }
 
 # two new partitions in the largest free block: xbootldr, then root.
 # sgdisk's partition number 0 means "next free slot" and start 0 means
@@ -109,21 +133,33 @@ dual_uuid() {
 # the new ones are found by partuuid afterwards, since their numbers
 # depend on what windows already has
 dual_partition() {
-    local xb root root_type=8300
+    local xb root root_type=8300 p n
     [ "$encrypt" = "yes" ] && root_type=8309
     xb=$(dual_uuid a)
     root=$(dual_uuid b)
     ESP_PART=$(dual_windows_on "$disk") || return 1
-    run sgdisk -n0:0:+987MiB -t0:ea00 -u0:"$xb" -c0:PHI_XBOOT "$disk"
-    run sgdisk -n0:0:0 -t0:"$root_type" -u0:"$root" -c0:PHI_ROOT "$disk"
-    run partprobe "$disk"
-    run udevadm settle
-    BOOT_PART=/dev/disk/by-partuuid/$xb
-    ROOT_PART=/dev/disk/by-partuuid/$root
-    if [ -z "${PHI_DRY:-}" ] && { [ ! -e "$BOOT_PART" ] || [ ! -e "$ROOT_PART" ]; }; then
-        echo "new partitions didn't show up under /dev/disk/by-partuuid" >>"$LOG"
-        return 1
+    # leftovers from an earlier phi-install go first. only PHI_XBOOT and
+    # PHI_ROOT, which windows never makes
+    # numbers first, then one sgdisk call: deleting one partition makes the
+    # kernel re-read the table, and the next one's sysfs entry can vanish
+    # for a moment
+    local nums=()
+    for p in $(dual_old_phi_parts "$disk"); do
+        n=$(cat "/sys/class/block/${p#/dev/}/partition") || return 1
+        ops_release_blk "${p#/dev/}" || return 1
+        run wipefs -af "$p" || return 1
+        nums+=(-d "$n")
+    done
+    if [ "${#nums[@]}" -gt 0 ]; then
+        run sgdisk "${nums[@]}" "$disk" || return 1
     fi
+    run sgdisk -n0:0:+987MiB -t0:ea00 -u0:"$xb" -c0:PHI_XBOOT "$disk" || return 1
+    run sgdisk -n0:0:0 -t0:"$root_type" -u0:"$root" -c0:PHI_ROOT "$disk" || return 1
+    ops_reread "$disk" || return 1
+    BOOT_PART=$(ops_part_by_uuid "$disk" "$xb") || return 1
+    ROOT_PART=$(ops_part_by_uuid "$disk" "$root") || return 1
+    run wipefs -af "$BOOT_PART" || return 1
+    run wipefs -af "$ROOT_PART" || return 1
 }
 
 dual_boot_nix() {

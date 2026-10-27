@@ -1307,6 +1307,15 @@ PanelWindow {
                                 readonly property bool isWired: device.type === DeviceType.Wired
                                 visible: isWifi || isWired
 
+                                // quickshell only lists the networks nm already knows unless the
+                                // scanner runs, and it's off by default. so: scan while this page is open
+                                Binding {
+                                    when: devSection.isWifi
+                                    target: devSection.device
+                                    property: "scannerEnabled"
+                                    value: center.open && center.section === "network"
+                                }
+
                                 Text {
                                     text: devSection.isWired ? "Ethernet" : "Networks"
                                     color: Theme.fgDim

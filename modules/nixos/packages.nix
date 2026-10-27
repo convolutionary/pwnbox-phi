@@ -35,9 +35,24 @@ let
     else
       null;
 
+  # OpenAI only publishes a "latest" .deb, so the flake's pinned hash goes
+  # stale with every release. pinned here to the file served on 2026-10-27;
+  # when it breaks again, the error's "got:" hash goes in below
   chatgpt =
     if inputs != null && inputs ? chatgpt then
-      (inputs.chatgpt.packages.${pkgs.stdenv.hostPlatform.system} or { }).chatgpt or null
+      let
+        upstream = (inputs.chatgpt.packages.${pkgs.stdenv.hostPlatform.system} or { }).chatgpt or null;
+      in
+      if upstream == null then
+        null
+      else
+        upstream.overrideAttrs (old: {
+          src = pkgs.fetchurl {
+            name = "chatgpt_amd64-2026-10-27.deb";
+            url = "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_amd64.deb";
+            hash = "sha256-6wgxxzTxVPk/jrzw4X0RjaDep9wXN9xhoecURDdb8ZA=";
+          };
+        })
     else
       null;
 
@@ -310,7 +325,7 @@ in
     base
     ++ optionals config.pwnbox.desktop.enable desktop
     ++ apps
-    ++ optionals (chatgpt != null) [ chatgpt ]
+    ++ optionals (config.pwnbox.packages.chatgpt && chatgpt != null) [ chatgpt ]
     ++ optionals config.pwnbox.packages.gaming gaming
     ++ optionals config.pwnbox.packages.creative creative
     ++ optionals (zenBrowser != null) [ zenBrowser ]

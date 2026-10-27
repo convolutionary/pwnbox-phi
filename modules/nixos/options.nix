@@ -172,6 +172,11 @@ in
       gaming = mkEnableOption "gaming and entertainment applications";
       creative = mkEnableOption "creative, media and office applications";
       hacking = mkEnableOption "pentesting and security tooling (the full pwnbox toolset)";
+      chatgpt = mkEnableOption ''
+        the ChatGPT desktop app. Off by default: it's downloaded from OpenAI's
+        "latest" link, so every OpenAI release changes the file and the build
+        fails on a hash mismatch until the pin in packages.nix is updated
+      '';
 
       toolset = lib.genAttrs (builtins.attrNames categories) (name: {
         enable = mkOption {

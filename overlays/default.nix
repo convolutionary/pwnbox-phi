@@ -20,7 +20,11 @@ final: prev: {
     exodus = prev.exodus;
   };
 
+  # the one overlay that has to compile (it patches c). the test suite adds
+  # minutes to every install and tests nothing this patch touches
   kitty = prev.kitty.overrideAttrs (old: {
+    doCheck = false;
+    doInstallCheck = false;
     postPatch = (old.postPatch or "") + ''
       substituteInPlace kitty/shaders.c \
         --replace-fail 'w->live_resize.num_of_resize_events > 1' '0'

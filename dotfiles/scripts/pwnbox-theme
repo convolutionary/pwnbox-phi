@@ -141,7 +141,8 @@ shadow_label() { [ "$(shadow_state)" = "off" ] && printf 'Off' || printf 'On'; }
 shadow_hypr() { [ "$(shadow_state)" = "off" ] && printf 'false' || printf 'true'; }
 ui_font() { read_state "$font_ui_state" "IoskeleyMono Nerd Font"; }
 app_font() { read_state "$font_app_state" "IoskeleyMono Nerd Font"; }
-ui_font_size() { read_state "$font_ui_size_state" 9; }
+# 9 was unreadable on a scaled 2k laptop panel
+ui_font_size() { read_state "$font_ui_size_state" 12; }
 app_font_size() { read_state "$font_app_size_state" 9; }
 scale() { read_state "$scale_state" 100; }
 
@@ -2949,12 +2950,21 @@ lighten_hex() {
 }
 
 apply_borders() {
-    local bg brdr hypr rofi kitty zed
+    local bg brdr active cur cdir cb hypr rofi kitty zed
     bg="$(sed -nE 's/^var bg[[:space:]]*=[[:space:]]*"#?([0-9a-fA-F]{6})".*/\1/p' \
         "$HOME/.config/quickshell/Theme.js" 2>/dev/null | head -1)"
     [ -n "$bg" ] || bg="080808"
     brdr="$(lighten_hex "#$bg" "${border_lighten:-12}")"
     brdr="${brdr#\#}"
+    # a custom theme can name its focused-window border (phi: gold). inactive
+    # windows keep the quiet one derived from the background
+    active="$brdr"
+    cur="$(read_state "$custom_state" "")"
+    if [ -n "$cur" ] && cdir="$(theme_dir_of "$cur")"; then
+        cb="$(conf_get "$cdir/theme.conf" border)"
+        cb="${cb#\#}"
+        [[ "$cb" =~ ^[0-9a-fA-F]{6}$ ]] && active="$cb"
+    fi
 
     hypr="$cache/hyprland.conf"
     if [ -f "$hypr" ]; then
@@ -2965,7 +2975,7 @@ apply_borders() {
                 printf '# pwnbox-borders-start\n'
                 printf 'general {\n'
                 printf '    border_size = %s\n' "$(border_hypr)"
-                printf '    col.active_border = rgba(%sff)\n' "$brdr"
+                printf '    col.active_border = rgba(%sff)\n' "$active"
                 printf '    col.inactive_border = rgba(%sff)\n' "$brdr"
                 printf '}\n'
                 printf 'windowrule = border_color rgba(%sff) rgba(%sff), match:class ^(spotify)$\n' "$brdr" "$brdr"
@@ -2996,12 +3006,12 @@ apply_borders() {
     fi
 
     rofi="$cache/rofi.rasi"
-    [ -f "$rofi" ] && sed -i -E "s/^([[:space:]]*brdr:[[:space:]]*).*/\1#${brdr};/" "$rofi" 2>/dev/null || true
+    [ -f "$rofi" ] && sed -i -E "s/^([[:space:]]*brdr:[[:space:]]*).*/\1#${active};/" "$rofi" 2>/dev/null || true
 
     kitty="$cache/kitty.conf"
     if [ -f "$kitty" ]; then
         sed -i -E \
-            -e "s/^(active_border_color[[:space:]]+).*/\1#${brdr}/" \
+            -e "s/^(active_border_color[[:space:]]+).*/\1#${active}/" \
             -e "s/^(inactive_border_color[[:space:]]+).*/\1#${brdr}/" \
             -e "s/^(inactive_tab_background[[:space:]]+).*/\1#${bg}/" \
             "$kitty" 2>/dev/null || true
@@ -3226,10 +3236,13 @@ custom_theme_dirs() {
 }
 
 theme_dir_of() {
-    local d
+    local d b
     for d in "$themes_dir"/*/; do
         [ -d "$d" ] || continue
-        [ "$(basename "${d%/}")" = "$1" ] && {
+        # case-insensitive: callers say Pwnbox, the folder is pwnbox. an exact
+        # match meant the default theme never applied
+        b="$(basename "${d%/}")"
+        [ "${b,,}" = "${1,,}" ] && {
             printf '%s' "${d%/}"
             return 0
         }
@@ -3367,6 +3380,8 @@ do_custom() {
     fi
 
     install_palette
+    # apply_borders reads the current theme's border key, so record it first
+    printf '%s\n' "$(basename "$dir")" >"$custom_state"
     apply_borders
     spawn_nice build_mono_icons
 
@@ -3437,6 +3452,7 @@ monochrome() {
     fi
     seed_monochrome
     sync_zed "$mono/pwnbox.json"
+    rm -f "$custom_state"
     apply_borders
     spawn_nice build_mono_icons
     set_wallpaper "$default_wall"
@@ -3462,10 +3478,10 @@ apply() {
         return 1
     fi
     install_palette
+    rm -f "$custom_state"
     apply_borders
     spawn_nice build_mono_icons
     printf '%s\n' "$img" >"$state"
-    rm -f "$custom_state"
     set_wallpaper "$img"
     reload_apps
     notify "Theme" "$(basename "$img")"
@@ -3494,7 +3510,7 @@ restore() {
         rm -f "$custom_state"
     fi
     if [ ! -f "$state" ] && [ ! -f "$cache/colors.json" ]; then
-        if dir="$(theme_dir_of Pwnbox)"; then
+        if dir="$(theme_dir_of Phi)" || dir="$(theme_dir_of Pwnbox)"; then
             do_custom "$dir" quiet && return 0
         fi
     fi
@@ -3578,6 +3594,7 @@ refresh() {
 }
 
 bar_styles=(
+    "phi|Phi (golden rule)"
     "islands|Islands (boxed groups)"
     "floating|Floating islands"
     "flat|Classic flat"
@@ -3937,7 +3954,14 @@ styles() {
 case "${1:-menu}" in
 menu) menu ;;
 pick | wallpaper) pick ;;
-custom | themes) custom ;;
+custom | themes)
+    if [ -n "${2:-}" ]; then
+        dir="$(theme_dir_of "$2")" || { echo "no theme called $2 in $themes_dir" >&2; exit 1; }
+        do_custom "$dir"
+    else
+        custom
+    fi
+    ;;
 monochrome) monochrome ;;
 apply) apply "${2:?usage: pwnbox-theme apply <image>}" ;;
 barstyle) barstyle ;;
@@ -3966,7 +3990,7 @@ restore) restore ;;
 usage: pwnbox-theme <command>
 
   pick, wallpaper          pick a wallpaper (pywal palette)
-  custom, themes           pick a fixed-palette theme
+  custom, themes [name]    pick a fixed-palette theme, or apply one by name
   monochrome               apply the built-in monochrome theme
   apply <image>            apply a wallpaper image
   barstyle                 pick a bar style

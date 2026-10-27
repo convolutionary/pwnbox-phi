@@ -22,6 +22,7 @@ phi_usage() {
     digits [n]      stream n digits of φ (default 61)
     stamp FILE...   mark scripts with the φ header (idempotent)
     selftest        test digits, the rule and the stamp
+    extras          install the extras phi-install left for after first boot
 
   ${PHI_BOLD}friends${PHI_RESET}
     phi-vpn         mullvad cli wrapper with phi defaults
@@ -123,6 +124,41 @@ okabe_selftest() {
     phi_ok "all $total checks passed"
 }
 
+# phi-install puts a booting system on the disk first and leaves the big
+# extras (pentest toolset, docker, games...) in hosts/<host>/later-extras.
+# this switches them on in the host config and rebuilds
+gilgamesh_extras() {
+    local flake=${PWNBOX_FLAKE:-$HOME/pwnbox} host e attr dir todo=() skipped=()
+    host=${PWNBOX_HOST:-$(cat /proc/sys/kernel/hostname)}
+    dir="$flake/hosts/$host"
+    [ -f "$dir/default.nix" ] || phi_die "no host config at $dir (set PWNBOX_FLAKE if the flake lives elsewhere)"
+    if [ ! -s "$dir/later-extras" ]; then
+        phi_ok "nothing left to install, every extra you picked is on"
+        return 0
+    fi
+    while read -r e; do
+        case "$e" in
+        hacking | gaming | creative | chatgpt | docker | libvirtd | wireshark | usbguard) attr=$e ;;
+        desktop) attr=desktop.enable ;;
+        mullvad) attr=vpn.mullvad ;;
+        performance) attr=performance.enable ;;
+        adaptive) attr=phi.power.adaptive ;;
+        nowebcam) attr=noWebcam ;;
+        *) skipped+=("$e"); continue ;; # nvidia needs gpu.nix, not a flag
+        esac
+        sed -i -E "s/^([[:space:]]*)${attr//./\\.} = false;/\1$attr = true;/" "$dir/default.nix"
+        todo+=("$e")
+    done <"$dir/later-extras"
+    phi_section "extras"
+    printf '  switching on: %s%s%s\n' "$PHI_AMBER" "${todo[*]}" "$PHI_RESET"
+    [ "${#skipped[@]}" -gt 0 ] && phi_warn "not a simple switch, add by hand: ${skipped[*]}"
+    printf '  this is the big download. plug in a cable if you can\n\n'
+    (cd "$flake" && ./scripts/install.sh switch) || phi_die "rebuild failed. the config already has them on, fix it and run ./scripts/install.sh switch in $flake"
+    rm -f "$dir/later-extras"
+    sed -i '/^# installed without these, they come after first boot:$/,/^# `phi extras` switches them on below and rebuilds$/d' "$dir/default.nix"
+    phi_ok "extras installed"
+}
+
 cmd=${1:-banner}
 [ "$#" -gt 0 ] && shift
 case "$cmd" in
@@ -147,6 +183,7 @@ stamp)
     exit "$rc"
     ;;
 selftest) okabe_selftest ;;
+extras) gilgamesh_extras ;;
 -h | --help | help) phi_usage ;;
 *)
     phi_usage
