@@ -29,7 +29,7 @@ libdir=$(dirname -- "$PHI_MARK")
 . "$libdir/phi-install-gpu"
 
 flake_src=${PHI_FLAKE:-/pwnbox}
-disk="" disk_summary="" ans="" wanted_extras="" failed_pkgs="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
+disk="" disk_summary="" wanted_extras="" failed_pkgs="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
 free_gib=0
 
 # --- arguments --------------------------------------------------------------
@@ -179,7 +179,7 @@ text_disk() {
 
 # only asks anything when the picked disk has windows on it
 screen_mode() {
-    local ans
+    local choice=""
     win_esp=$(dual_windows_on "$disk") || win_esp=""
     mode=wipe
     if [ -z "$win_esp" ]; then
@@ -190,11 +190,11 @@ screen_mode() {
         disk_summary=$(ops_disk_summary "$disk")
         if [ -n "$disk_summary" ] && [ -z "$(tui_answer disk)" ]; then
             TUI_SCREEN=text_nonempty
-            tui_menu ans "this disk isn't empty" \
+            tui_menu choice "this disk isn't empty" \
                 "wipe|wipe it anyway|everything listed above goes" \
                 "back|pick another disk|" \
                 "quit|quit|nothing written yet"
-            case "$ans" in
+            case "$choice" in
             back) PHI_ANS_DISK="" screen_disk ;;
             quit) tui_quit ;;
             esac
@@ -205,11 +205,11 @@ screen_mode() {
     TUI_SCREEN=text_mode
     if [ "$firmware" != "uefi" ]; then
         [ "$(tui_answer mode)" = "alongside" ] && phi_die "mode=alongside needs uefi, this machine booted bios"
-        tui_menu ans "windows is on this disk" \
+        tui_menu choice "windows is on this disk" \
             "wipe|wipe the whole disk|windows and everything else goes" \
             "back|pick another disk|" \
             "quit|quit|nothing written yet"
-        case "$ans" in
+        case "$choice" in
         back) PHI_ANS_DISK="" screen_disk ;;
         quit) tui_quit ;;
         esac

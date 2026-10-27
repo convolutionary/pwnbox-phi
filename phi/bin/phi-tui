@@ -108,12 +108,12 @@ tui_error_line() {
 # tui_menu VAR "question" "value|label|detail" ...
 # arrow keys or j/k to move, enter to pick. VAR gets the value.
 tui_menu() {
-    local __var=$1 q=$2 ans sel=0 i key value label detail
+    local __var=$1 q=$2 __ans sel=0 i key value label detail
     shift 2
     local items=("$@")
-    ans=$(tui_answer "$__var")
-    if [ -n "$ans" ]; then
-        printf -v "$__var" '%s' "$ans"
+    __ans=$(tui_answer "$__var")
+    if [ -n "$__ans" ]; then
+        printf -v "$__var" '%s' "$__ans"
         return 0
     fi
     while :; do
@@ -146,13 +146,13 @@ tui_menu() {
 # tui_checklist VAR "question" "key|label|detail|on" ...
 # space toggles, enter accepts. VAR gets the ticked keys, space separated.
 tui_checklist() {
-    local __var=$1 q=$2 ans sel=0 i key k label detail on picked
+    local __var=$1 q=$2 __ans sel=0 i key k label detail on picked
     shift 2
     local items=("$@") state=()
-    ans=$(tui_answer "$__var")
-    if [ -n "$ans" ]; then
-        [ "$ans" = "none" ] && ans=""
-        printf -v "$__var" '%s' "$ans"
+    __ans=$(tui_answer "$__var")
+    if [ -n "$__ans" ]; then
+        [ "$__ans" = "none" ] && __ans=""
+        printf -v "$__var" '%s' "$__ans"
         return 0
     fi
     for ((i = 0; i < ${#items[@]}; i++)); do
