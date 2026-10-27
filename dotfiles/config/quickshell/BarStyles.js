@@ -3,6 +3,8 @@
 
 function geometry(name, barHeight, bgA) {
     switch (name) {
+    case "phi":
+        return { file: "19", height: 40, color: bgA, exclusive: 40, top: true, bottom: false, left: true, right: true, vertical: false, clock: "center" };
     case "floating":
         return { file: "02", height: 48, color: "transparent", exclusive: 38, top: true, bottom: false, left: true, right: true, vertical: false, clock: "center" };
     case "flat":

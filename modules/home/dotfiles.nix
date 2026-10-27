@@ -395,7 +395,7 @@ in
     fi
     run chmod u+w "$hyprlock_conf" 2>/dev/null || true
     if [ ! -e "$theme_dir/barstyle" ]; then
-      run sh -c "printf '%s' islands > '$theme_dir/barstyle'"
+      run sh -c "printf '%s' phi > '$theme_dir/barstyle'"
     fi
     if [ ! -e "$theme_dir/radius-window" ]; then
       run sh -c "printf '%s' 9 > '$theme_dir/radius-window'"

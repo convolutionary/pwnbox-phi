@@ -6,7 +6,7 @@ import Quickshell.Services.Notifications
 ShellRoot {
     id: root
 
-    property string barStyle: "islands"
+    property string barStyle: "phi"
     property string mainMonitor: "@MAINMONITOR@"
 
     property bool dnd: false

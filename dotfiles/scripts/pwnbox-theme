@@ -141,7 +141,8 @@ shadow_label() { [ "$(shadow_state)" = "off" ] && printf 'Off' || printf 'On'; }
 shadow_hypr() { [ "$(shadow_state)" = "off" ] && printf 'false' || printf 'true'; }
 ui_font() { read_state "$font_ui_state" "IoskeleyMono Nerd Font"; }
 app_font() { read_state "$font_app_state" "IoskeleyMono Nerd Font"; }
-ui_font_size() { read_state "$font_ui_size_state" 9; }
+# 9 was unreadable on a scaled 2k laptop panel
+ui_font_size() { read_state "$font_ui_size_state" 12; }
 app_font_size() { read_state "$font_app_size_state" 9; }
 scale() { read_state "$scale_state" 100; }
 
@@ -3581,6 +3582,7 @@ refresh() {
 }
 
 bar_styles=(
+    "phi|Phi (golden rule)"
     "islands|Islands (boxed groups)"
     "floating|Floating islands"
     "flat|Classic flat"

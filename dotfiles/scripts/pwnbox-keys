@@ -21,7 +21,7 @@ fi
 
 keys() {
     cat <<'EOF'
-── apps ──────────────────────────────
+φ apps
 Alt + Space             app launcher
 Alt + T                 terminal (kitty)
 Alt + F                 browser (zen)
@@ -29,7 +29,7 @@ Super + E               files
 Super + W               ranger in a terminal
 Alt + D                 discord (equibop)
 Alt + M                 music (cmus)
-── windows ───────────────────────────
+φ windows
 Alt + Z                 close window
 Super + F               fullscreen
 Super + Shift + F       maximize
@@ -40,11 +40,11 @@ Super + Shift + arrows  move window
 Super + Ctrl + arrows   resize window
 Super + Ctrl + 1…9      split ratio 10…90%
 Super + drag            move (left) / resize (right)
-── workspaces ────────────────────────
+φ workspaces
 Alt + 1…0               go to workspace
 Super + 1…0             send window to workspace
 Ctrl + Alt + ← / →      previous / next workspace
-── system ────────────────────────────
+φ system
 Super (tap)             control center
 Alt + S                 settings: theme, bar, fonts, scale
 Super + S               gnome settings
@@ -60,4 +60,5 @@ Super + Alt + Q         log out
 EOF
 }
 
-keys | rofi -dmenu -i -no-custom -p "φ shortcuts" -mesg "type to search" >/dev/null || true
+# monospace, or the key column doesn't line up
+keys | rofi -dmenu -i -no-custom -p "φ shortcuts" -mesg "type to search"     -theme-str 'element-text { font: "JetBrainsMono Nerd Font Mono 12"; } listview { lines: 16; }'     >/dev/null || true
