@@ -29,7 +29,7 @@ libdir=$(dirname -- "$PHI_MARK")
 . "$libdir/phi-install-gpu"
 
 flake_src=${PHI_FLAKE:-/pwnbox}
-disk="" disk_summary="" ans="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
+disk="" disk_summary="" ans="" wanted_extras="" failed_pkgs="" mode="wipe" encrypt="" fs="" host="" user="" fullname="" tz="" extras="" firmware=""
 free_gib=0
 
 # --- arguments --------------------------------------------------------------
@@ -334,6 +334,7 @@ screen_extras() {
         "libvirtd|libvirt / kvm|for vms|off"
         "wireshark|wireshark|and the wireshark group|off"
         "creative|creative apps|media and office|off"
+        "chatgpt|chatgpt desktop|breaks the build whenever openai ships an update|off"
         "gaming|gaming|steam and friends|off"
         "usbguard|usbguard|blocks usb devices plugged in later|off"
         "nowebcam|no webcam|blacklists uvcvideo|off"
@@ -357,6 +358,7 @@ text_review() {
         local old_phi
         old_phi=$(dual_old_phi_parts "$disk")
         if [ -n "$old_phi" ]; then
+            # shellcheck disable=SC2086 # one pattern per partition
             disk_summary=$(ops_disk_summary "$disk" | grep -F -f <(printf '%s\t\n' $old_phi))
             printf '\n  %san earlier pwnbox-phi install on this disk gets erased:%s\n' "$PHI_RED" "$PHI_RESET"
             summary_rows
@@ -456,12 +458,66 @@ screen_install() {
     phase "mounting" ops_mount && phi_ok "mounted at $MNT"
     phase "copying the flake" ops_copy_flake && phi_ok "flake copied to /home/$user/pwnbox"
     phase "writing the host config" ops_write_host && phi_ok "hosts/$host written"
-    phase "nixos-install" tui_run "building and installing (this is the long one)" "$LOG" \
-        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --flake "$(ops_flake_dir)#$host"
+    phase "nixos-install" install_system
     ops_copy_wifi && compgen -G "$MNT/etc/NetworkManager/system-connections/*.nmconnection" >/dev/null &&
         phi_ok "wifi from the stick copied over, it connects at first boot"
     phase "setting your password" ops_set_password && phi_ok "password set for $user"
     phase "fixing ownership" ops_fix_owner
+}
+
+# the extras that are config, not big downloads. a minimal retry keeps these
+minimal_extras() {
+    local e out=""
+    for e in $extras; do
+        case "$e" in desktop | mullvad | nvidia | adaptive | performance | usbguard | nowebcam) out+="$e " ;; esac
+    done
+    printf '%s' "${out% }"
+}
+
+# nixos-install, and when it fails, a way forward instead of a dead end:
+# a smaller system that boots now, with the rest added after first boot
+install_system() {
+    local pick keep
+    wanted_extras=""
+    while ! ops_nixos_install; do
+        # dry runs and answer files have nobody to ask
+        [ -n "${PHI_DRY:-}" ] && return 1
+        [ -n "$(tui_answer disk)" ] && return 1
+        failed_pkgs=$(ops_failed_pkgs)
+        TUI_SCREEN=text_install_failed
+        TUI_STEP=7
+        keep=$(minimal_extras)
+        tui_menu pick "the build failed" \
+            "minimal|install without the big extras|keeps: ${keep:-nothing}. the rest after first boot" \
+            "bare|install with no extras at all|console only, add everything after first boot" \
+            "retry|try again|if the connection dropped" \
+            "shell|drop to a shell|the target stays mounted at $MNT"
+        case "$pick" in
+        minimal | bare)
+            [ -z "$wanted_extras" ] && wanted_extras=$extras
+            if [ "$pick" = minimal ]; then extras=$(minimal_extras); else extras=""; fi
+            ops_rewrite_host || return 1
+            ;;
+        shell)
+            tui_leave
+            exec bash
+            ;;
+        esac
+        tui_header
+        phi_section "installing"
+        printf '\n'
+    done
+}
+text_install_failed() {
+    if [ -n "$failed_pkgs" ]; then
+        say "what broke:"
+        printf '%s\n' "$failed_pkgs" | sed "s/^/    ${PHI_AMBER}/; s/\$/${PHI_RESET}/"
+        printf '\n'
+    fi
+    grep -q "hash mismatch in fixed-output derivation" "$LOG" 2>/dev/null &&
+        say "a download changed upstream (the app shipped a new version). nothing wrong with your machine."
+    say "nothing is lost: the disk stays set up. full log: ${PHI_GOLD}$LOG${PHI_RESET}"
+    printf '\n'
 }
 
 screen_done() {

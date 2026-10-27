@@ -394,7 +394,7 @@ has() { case " $extras " in *" $1 "*) echo true ;; *) echo false ;; esac }
 ops_host_nix() {
     cat <<EOF
 # written by phi-install on $(date +%F). edit freely, rebuild with
-# ./scripts/install.sh switch
+# ./scripts/install.sh switch$([ -n "${wanted_extras:-}" ] && printf '\n#\n# installed minimal because the full build failed. you picked:\n#   %s\n# flip those back on below, then ./scripts/install.sh switch' "$wanted_extras")
 { pkgs, ... }:
 {
   imports = [
@@ -425,6 +425,7 @@ ops_host_nix() {
       hacking = $(has hacking);
       gaming = $(has gaming);
       creative = $(has creative);
+      chatgpt = $(has chatgpt);
     };
 
     phi.hardening = {
@@ -482,6 +483,26 @@ ops_write_host() {
     ops_boot_nix >"$dir/boot.nix"
     [ "$(has nvidia)" = true ] && gpu_nix >"$dir/gpu.nix"
     return 0
+}
+
+# nixos-install, with the build log going to $LOG. fallback: if a
+# prebuilt package can't be downloaded, build it instead of giving up
+ops_nixos_install() {
+    tui_run "building and installing (this is the long one)" "$LOG" \
+        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy \
+        --option fallback true --flake "$(ops_flake_dir)#$host"
+}
+
+# rewrites hosts/<host>/default.nix for the current $extras, keeping the
+# hardware config that's already there
+ops_rewrite_host() {
+    ops_host_nix >"$(ops_flake_dir)/hosts/$host/default.nix"
+}
+
+# names of the packages that broke the last build, from the log
+ops_failed_pkgs() {
+    grep -oE "(hash mismatch in fixed-output derivation|Cannot build|builder for) '/nix/store/[a-z0-9]{32}-[^']+\.drv'" "$LOG" 2>/dev/null |
+        sed -E "s|.*/nix/store/[a-z0-9]{32}-||; s|\.drv'\$||" | awk '!seen[$0]++' | head -n 5
 }
 
 # passwd prompts on the real terminal; the password never touches this script

@@ -36,7 +36,7 @@ other ISO (`dd`, Ventoy).
 | disk | which disk. Disks with Windows are marked, and picking one asks: next to Windows, or wipe. The USB stick you booted from isn't listed |
 | layout | encryption yes/no, ext4 or btrfs |
 | system | hostname, username, full name, time zone |
-| extras | desktop, pentest toolset, Mullvad, NVIDIA driver (if there's a card), adaptive power (laptops), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
+| extras | desktop, pentest toolset, Mullvad, ChatGPT (off by default), NVIDIA driver (if there's a card), adaptive power (laptops), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
 | review | everything on one screen. Installing means typing the disk name |
 | install | runs it all, with the live log tail on screen |
 | done | reboot, or stay with the new system mounted at `/mnt` |
@@ -174,6 +174,17 @@ again is safe:
 - after partitioning, the installer checks that the kernel really loaded the
   new table. If something still holds the disk, it stops there and says so,
   instead of writing to partitions that don't exist
+
+If the system build itself fails (usually an app whose download changed
+upstream), the installer shows which package broke and offers to install
+without the big extras, or with none, so you always end up with a machine
+that boots. What you originally picked is noted at the top of
+`hosts/<host>/default.nix`; switch it back on there and run
+`./scripts/install.sh switch` later.
+
+ChatGPT is an opt-in extra, off by default. OpenAI only publishes a "latest"
+download, so each OpenAI release breaks its pinned hash until the pin in
+`modules/nixos/packages.nix` is updated.
 
 Before a wipe, the review screen lists every partition that will be erased.
 If the disk isn't empty but has no Windows boot manager on it, you get a
