@@ -390,11 +390,21 @@ ops_copy_flake() {
 
 has() { case " $extras " in *" $1 "*) echo true ;; *) echo false ;; esac }
 
+# what was picked but isn't in this build: the big extras, or everything
+# after a bare retry. `phi extras` turns these on after first boot
+ops_later_extras() {
+    local e out=""
+    for e in ${wanted_extras:-}; do
+        case " $extras " in *" $e "*) ;; *) out+="$e " ;; esac
+    done
+    printf '%s' "${out% }"
+}
+
 # hosts/<host>/default.nix, in the same shape as hosts/nixos/default.nix
 ops_host_nix() {
     cat <<EOF
 # written by phi-install on $(date +%F). edit freely, rebuild with
-# ./scripts/install.sh switch$([ -n "${wanted_extras:-}" ] && printf '\n#\n# installed minimal because the full build failed. you picked:\n#   %s\n# flip those back on below, then ./scripts/install.sh switch' "$wanted_extras")
+# ./scripts/install.sh switch$([ -n "$(ops_later_extras)" ] && printf '\n#\n# installed without these, they come after first boot:\n#   %s\n# `phi extras` switches them on below and rebuilds' "$(ops_later_extras)")
 { pkgs, ... }:
 {
   imports = [
@@ -481,22 +491,81 @@ ops_write_host() {
     fi
     ops_host_nix >"$dir/default.nix"
     ops_boot_nix >"$dir/boot.nix"
+    ops_write_later "$dir"
     [ "$(has nvidia)" = true ] && gpu_nix >"$dir/gpu.nix"
     return 0
 }
 
-# nixos-install, with the build log going to $LOG. fallback: if a
-# prebuilt package can't be downloaded, build it instead of giving up
+# "jobs cores" for nix. max-jobs=auto with cores=0 lets every build use
+# every core at once: 32 compilers on a 16 GiB laptop, and the oom killer
+# takes nix down mid-install. this budgets ~2 GiB per compiler process,
+# at most 4 builds side by side, the cores split between them. downloads
+# aren't affected, those go by max-substitution-jobs
+ops_build_slots() {
+    local ncpu memg procs jobs
+    ncpu=$(nproc 2>/dev/null || echo 2)
+    memg=$(awk '/^MemTotal:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null)
+    procs=$((${memg:-4} / 2))
+    [ "$procs" -gt "$ncpu" ] && procs=$ncpu
+    [ "$procs" -lt 1 ] && procs=1
+    jobs=$((procs < 4 ? procs : 4))
+    echo "$jobs $((procs / jobs))"
+}
+
+# the system gets built here instead of inside nixos-install, so the build
+# can report real progress. same build nixos-install --flake does (straight
+# into the target's store, reusing whatever the stick already has), then
+# nixos-install --system only sets the profile and the bootloader.
+#
+# speed: nix fetches 16 paths at a time by default and a full install is
+# ~5000 of them, mostly small, so the download sits idle between requests.
+# 64 at once keeps the line busy. fallback: if a prebuilt package can't be
+# downloaded, build it instead of giving up
 ops_nixos_install() {
-    tui_run "building and installing (this is the long one)" "$LOG" \
-        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy \
-        --option fallback true --flake "$(ops_flake_dir)#$host"
+    local tmp sys jobs cores
+    read -r jobs cores < <(ops_build_slots)
+    # 0700 at the top of the target, like nixos-install does it. nix won't
+    # build under a world-writable dir, so not $MNT/tmp
+    tmp=$(mktemp -d -p "$MNT" .phi-install.XXXXXX) || return 1
+    # builds go on the target disk. the live system's / is ram, and a big
+    # build in there runs the stick out of memory halfway through
+    mkdir -p "$tmp/build" 2>/dev/null
+    TMPDIR=$tmp/build tui_nix "downloading and building the system" "$LOG" \
+        nix --extra-experimental-features "nix-command flakes" build \
+        --store "$MNT" --extra-substituters "auto?trusted=1" \
+        --out-link "$tmp/system" \
+        --max-jobs "$jobs" --cores "$cores" \
+        --option max-substitution-jobs 64 --option http-connections 64 \
+        --option download-attempts 5 --option connect-timeout 15 \
+        --option fallback true --option build-dir "$tmp/build" \
+        "$(ops_flake_dir)#nixosConfigurations.\"$host\".config.system.build.toplevel" || return 1
+    if [ -n "${PHI_DRY:-}" ]; then
+        sys=/nix/store/...-nixos-system-$host
+    else
+        sys=$(readlink "$tmp/system") || { echo "nix build left no system at $tmp/system" >>"$LOG"; return 1; }
+    fi
+    tui_run "installing the bootloader" "$LOG" \
+        nixos-install --root "$MNT" --no-root-passwd --no-channel-copy --system "$sys" || return 1
+    rm -rf "$tmp"
 }
 
 # rewrites hosts/<host>/default.nix for the current $extras, keeping the
 # hardware config that's already there
 ops_rewrite_host() {
     ops_host_nix >"$(ops_flake_dir)/hosts/$host/default.nix"
+    ops_write_later "$(ops_flake_dir)/hosts/$host"
+}
+
+# one extra per line, read by `phi extras` on the installed system
+ops_write_later() {
+    local later
+    later=$(ops_later_extras)
+    if [ -n "$later" ]; then
+        # shellcheck disable=SC2086 # one per line on purpose
+        printf '%s\n' $later >"$1/later-extras"
+    else
+        rm -f "$1/later-extras"
+    fi
 }
 
 # names of the packages that broke the last build, from the log
@@ -511,16 +580,25 @@ ops_set_password() {
         run nixos-enter --root "$MNT" -c "passwd $user"
         return 0
     fi
+    local tries=0
     tui_suspend
     printf '\n  %sφ%s password for %s%s%s (you log in and sudo with this)\n\n' "$PHI_AMBER" "$PHI_RESET" "$PHI_BOLD" "$user" "$PHI_RESET"
-    until nixos-enter --root "$MNT" -c "passwd $user"; do
+    # by path: nixos-enter keeps the caller's PATH, which only finds passwd
+    # inside the target by luck. and a limit, so a passwd that can't run
+    # ends on the failure screen instead of asking forever
+    until nixos-enter --root "$MNT" -c "/nix/var/nix/profiles/system/sw/bin/passwd $user"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 5 ]; then
+            tui_resume
+            return 1
+        fi
         printf '\n  %s!%s that didn'"'"'t take, try again\n\n' "$PHI_AMBER" "$PHI_RESET"
     done
     tui_resume
 }
 
 ops_fix_owner() {
-    run nixos-enter --root "$MNT" -c "chown -R $user:users /home/$user/pwnbox"
+    run nixos-enter --root "$MNT" -c "/nix/var/nix/profiles/system/sw/bin/chown -R $user:users /home/$user/pwnbox"
 }
 
 # the wifi you joined on the stick (nmtui) comes along, so the new system

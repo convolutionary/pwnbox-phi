@@ -1,8 +1,9 @@
 # phi-install
 
 The pwnbox-phi installer ISO boots into `phi-install`, a full-screen
-installer that partitions a disk, writes a host config into the flake and
-runs `nixos-install`. The manual route in [ISOs](isos.md#installer-iso) still
+installer that partitions a disk, writes a host config into the flake,
+builds the system straight into the new disk's store and runs
+`nixos-install` for the bootloader. The manual route in [ISOs](isos.md#installer-iso) still
 works if you'd rather do it by hand.
 
 ## Build the ISO
@@ -38,7 +39,7 @@ other ISO (`dd`, Ventoy).
 | system | hostname, username, full name, time zone |
 | extras | desktop, pentest toolset, Mullvad, ChatGPT (off by default), NVIDIA driver (if there's a card), adaptive power (laptops), performance mode, Docker, libvirt, Wireshark, creative, gaming, USBGuard, no webcam |
 | review | everything on one screen. Installing means typing the disk name |
-| install | runs it all, with the live log tail on screen |
+| install | runs it all. The system build shows a progress bar (bytes downloaded, packages built, an estimate of the time left), what is building right now and its last output lines |
 | done | reboot, or stay with the new system mounted at `/mnt` |
 
 Keys: arrows or `j`/`k` to move, `space` to tick, `enter` to pick, `q` to
@@ -175,12 +176,34 @@ again is safe:
   new table. If something still holds the disk, it stops there and says so,
   instead of writing to partitions that don't exist
 
+The installer only puts a system that boots on the disk: the base, the
+desktop, Mullvad and the other extras that are just config (NVIDIA,
+power, USBGuard, no webcam). The big extras (pentest toolset, Docker,
+libvirt, Wireshark, creative, gaming, ChatGPT) are listed on the review
+screen under "after boot" and written to `hosts/<host>/later-extras`. Once
+you're logged in and online:
+
+```bash
+phi extras
+```
+
+switches them on in `hosts/<host>/default.nix` and rebuilds. Running it
+again when nothing is left says so and does nothing.
+
+With the default picks the installer downloads about 11.4 GiB from
+cache.nixos.org (34 GiB unpacked). Everything including the pentest
+toolset was 20.5 GiB, so `phi extras` brings the rest. Give the disk at
+least 100 GiB. Downloads run
+64 packages at a time. The few things that compile locally (unfree tools
+the binary cache can't ship, like Terraform, Vault and VeraCrypt, plus the
+patched kitty) get about 2 GiB of RAM per compiler process, so a laptop
+with little memory builds slower instead of running out of RAM.
+
 If the system build itself fails (usually an app whose download changed
 upstream), the installer shows which package broke and offers to install
-without the big extras, or with none, so you always end up with a machine
-that boots. What you originally picked is noted at the top of
-`hosts/<host>/default.nix`; switch it back on there and run
-`./scripts/install.sh switch` later.
+with no extras at all, so you always end up with a machine that boots.
+Everything you picked then waits in `hosts/<host>/later-extras` for
+`phi extras`.
 
 ChatGPT is an opt-in extra, off by default. OpenAI only publishes a "latest"
 download, so each OpenAI release breaks its pinned hash until the pin in

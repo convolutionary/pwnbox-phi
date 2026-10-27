@@ -139,4 +139,5 @@ wants `.pragma library` on the first line.
 phi spiral       # draws r = a·φ^(2θ/π) one dot at a time
 phi digits 500   # 500 digits of φ, typed out
 phi selftest     # tests digits, the rule and the stamp
+phi extras       # install the extras phi-install left for after first boot
 ```

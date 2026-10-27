@@ -1,4 +1,10 @@
 { pkgs, lib, ... }:
+let
+  # just the sdk tools. androidenv.androidPkgs is the "last 5 years" bundle:
+  # five platforms, the ndk, the emulator and eight system images, many GB
+  # from google that get unpacked on every install
+  android = pkgs.androidenv.composeAndroidPackages { };
+in
 with pkgs;
 [
   file
@@ -65,8 +71,8 @@ with pkgs;
 
   jadx
   apktool
-  (lib.head androidenv.androidPkgs.build-tools)
-  androidenv.androidPkgs.cmdline-tools-package
+  (lib.head android.build-tools)
+  android.cmdline-tools-package
   libimobiledevice
   libplist
   ipsw

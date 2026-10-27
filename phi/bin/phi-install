@@ -380,7 +380,12 @@ text_review() {
     review_row "hostname" "$host"
     review_row "user" "$user ($fullname)"
     review_row "time zone" "$tz"
-    review_row "extras" "${extras:-none}"
+    local now later e
+    now=$(minimal_extras)
+    later=""
+    for e in $extras; do case " $now " in *" $e "*) ;; *) later+="$e " ;; esac; done
+    review_row "extras" "${now:-none}"
+    [ -n "$later" ] && review_row "after boot" "${later% }  ${PHI_DIM}(phi extras, the big download)${PHI_RESET}"
     review_row "flake" "/home/$user/pwnbox, host '$host'"
     printf '\n'
 }
@@ -457,6 +462,11 @@ screen_install() {
     phase "formatting" ops_format && phi_ok "formatted ($fs)"
     phase "mounting" ops_mount && phi_ok "mounted at $MNT"
     phase "copying the flake" ops_copy_flake && phi_ok "flake copied to /home/$user/pwnbox"
+    # the big extras (pentest toolset, docker, games...) are most of the
+    # download. they come after first boot with `phi extras`, so the stick
+    # only has to get a system that boots onto the disk
+    wanted_extras=$extras
+    extras=$(minimal_extras)
     phase "writing the host config" ops_write_host && phi_ok "hosts/$host written"
     phase "nixos-install" install_system
     ops_copy_wifi && compgen -G "$MNT/etc/NetworkManager/system-connections/*.nmconnection" >/dev/null &&
@@ -465,7 +475,8 @@ screen_install() {
     phase "fixing ownership" ops_fix_owner
 }
 
-# the extras that are config, not big downloads. a minimal retry keeps these
+# the extras that are config, not big downloads. these go on from the stick,
+# the rest after first boot
 minimal_extras() {
     local e out=""
     for e in $extras; do
@@ -477,8 +488,7 @@ minimal_extras() {
 # nixos-install, and when it fails, a way forward instead of a dead end:
 # a smaller system that boots now, with the rest added after first boot
 install_system() {
-    local pick keep
-    wanted_extras=""
+    local pick
     while ! ops_nixos_install; do
         # dry runs and answer files have nobody to ask
         [ -n "${PHI_DRY:-}" ] && return 1
@@ -486,16 +496,13 @@ install_system() {
         failed_pkgs=$(ops_failed_pkgs)
         TUI_SCREEN=text_install_failed
         TUI_STEP=7
-        keep=$(minimal_extras)
         tui_menu pick "the build failed" \
-            "minimal|install without the big extras|keeps: ${keep:-nothing}. the rest after first boot" \
             "bare|install with no extras at all|console only, add everything after first boot" \
             "retry|try again|if the connection dropped" \
             "shell|drop to a shell|the target stays mounted at $MNT"
         case "$pick" in
-        minimal | bare)
-            [ -z "$wanted_extras" ] && wanted_extras=$extras
-            if [ "$pick" = minimal ]; then extras=$(minimal_extras); else extras=""; fi
+        bare)
+            extras=""
             ops_rewrite_host || return 1
             ;;
         shell)
@@ -542,6 +549,12 @@ text_done() {
     if [ "$mode" = "alongside" ]; then
         say "windows is in the boot menu. if a windows update ever puts itself first again,"
         say "pick ${PHI_GOLD}Linux Boot Manager${PHI_RESET} in your firmware's boot menu (often F12 or F8)."
+    fi
+    local later
+    later=$(ops_later_extras)
+    if [ -n "$later" ]; then
+        say "still to come: ${PHI_AMBER}$later${PHI_RESET}"
+        say "log in, get online, then run ${PHI_GOLD}phi extras${PHI_RESET}. that's the big download."
     fi
     say "after the first login: ${PHI_GOLD}phi-vpn login${PHI_RESET} to arm mullvad, ${PHI_GOLD}phi-audit${PHI_RESET} to see the grade."
     printf '\n'

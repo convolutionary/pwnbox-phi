@@ -243,40 +243,150 @@ tui_quit() {
     exit 0
 }
 
+PHI_PROGRESS_AWK="$(dirname -- "${PHI_MARK:-${BASH_SOURCE[0]}}")/phi-nix-progress.awk"
+TUI_LIVE_ROWS=8 # height of the live block, fixed so it redraws in place
+TUI_DRAWN=0
+
+# mm:ss, or h:mm:ss once it gets that far
+tui_clock() {
+    local s=$1
+    if [ "$s" -ge 3600 ]; then
+        printf '%d:%02d:%02d' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+    else
+        printf '%02d:%02d' $((s / 60)) $((s % 60))
+    fi
+}
+
+# redraws the live block. every row is cut to the terminal width before it
+# gets colour, so nothing wraps, and the cursor moves back up by the number
+# of rows it printed. the old version saved an absolute cursor position,
+# which went stale as soon as the screen scrolled and printed the block
+# again lower down, over and over
+#   tui_live "header" "bar" "summary" "now" "log line"...
+tui_live() {
+    local cols w i row
+    # no terminal (answers file, piped to a log): a plain line every 30 s
+    if [ ! -t 1 ]; then
+        [ $((SECONDS - ${TUI_PLAIN_AT:-0})) -ge 30 ] || return 0
+        TUI_PLAIN_AT=$SECONDS
+        printf '  %s  %s  %s\n' "$1" "$2" "$3" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g'
+        return 0
+    fi
+    cols=$(phi_cols)
+    w=$((cols - 8))
+    [ "$TUI_DRAWN" -gt 0 ] && printf '\e[%dA' "$TUI_DRAWN"
+    printf '\r\e[2K  %s\n' "$1"
+    printf '\r\e[2K  %s\n' "$2"
+    row=${3:0:w}
+    printf '\r\e[2K  %s%s%s\n' "$PHI_GOLD" "$row" "$PHI_RESET"
+    row=${4:0:w}
+    printf '\r\e[2K  %s%s%s\n' "$PHI_AMBER" "$row" "$PHI_RESET"
+    shift 4
+    for ((i = 0; i < TUI_LIVE_ROWS - 4; i++)); do
+        row=${1:-}
+        [ "$#" -gt 0 ] && shift
+        if [ -n "$row" ]; then
+            printf '\r\e[2K    %s│%s %s%s%s\n' "$PHI_BRONZE" "$PHI_RESET" "$PHI_DIM" "${row:0:w-2}" "$PHI_RESET"
+        else
+            printf '\r\e[2K\n'
+        fi
+    done
+    TUI_DRAWN=$TUI_LIVE_ROWS
+}
+
+# wipes the live block and leaves the cursor where it started
+tui_live_clear() {
+    TUI_PLAIN_AT=0
+    [ "$TUI_DRAWN" -gt 0 ] || return 0
+    printf '\e[%dA\r\e[J' "$TUI_DRAWN"
+    TUI_DRAWN=0
+}
+
+tui_done_line() {
+    local rc=$1 label=$2 log=$3 el=$4
+    if [ "$rc" -eq 0 ]; then
+        phi_ok "$label $PHI_DIM($(tui_clock "$el"))$PHI_RESET"
+    else
+        printf '  %s✗%s %s %s(exit %d, log: %s)%s\n' "$PHI_RED" "$PHI_RESET" "$label" "$PHI_DIM" "$rc" "$log" "$PHI_RESET"
+    fi
+}
+
 # tui_run "label" logfile cmd...
-# runs cmd with output going to the log, and redraws a status block with a
-# spinner, elapsed time and the last few log lines until it's done
+# runs cmd with output going to the log, and shows a spinner, elapsed time
+# and the last few log lines until it's done. for short steps
 tui_run() {
-    local label=$1 log=$2 pid rc start now el i=0 cols tailn=6
+    local label=$1 log=$2 pid rc start el i=0
     shift 2
-    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) lines=()
     if [ -n "${PHI_DRY:-}" ]; then
         printf '  %s$%s %s\n' "$PHI_BRONZE" "$PHI_RESET" "$*" | tee -a "$log"
         return 0
     fi
-    "$@" >>"$log" 2>&1 &
+    "$@" >>"$log" 2>&1 </dev/null &
     pid=$!
-    start=$(date +%s)
-    cols=$(phi_cols)
+    start=$SECONDS
+    trap 'kill "$pid" 2>/dev/null; tui_leave; exit 130' INT TERM
     while kill -0 "$pid" 2>/dev/null; do
-        now=$(date +%s)
-        el=$((now - start))
-        printf '\e[s\e[J'
-        printf '  %s%s%s %s  %s%02d:%02d%s\n\n' "$PHI_AMBER" "${frames[i % 10]}" "$PHI_RESET" "$label" \
-            "$PHI_DIM" $((el / 60)) $((el % 60)) "$PHI_RESET"
-        tail -n "$tailn" "$log" 2>/dev/null | cut -c1-$((cols - 8)) |
-            sed "s/^/    ${PHI_BRONZE}│${PHI_RESET} ${PHI_DIM}/; s/\$/${PHI_RESET}/"
-        printf '\e[u'
+        el=$((SECONDS - start))
+        mapfile -t lines < <(tail -n 4 "$log" 2>/dev/null | sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/[[:cntrl:]]/ /g')
+        tui_live "$PHI_AMBER${frames[i % 10]}$PHI_RESET $label  $PHI_DIM$(tui_clock "$el")$PHI_RESET" "" "" "" "${lines[@]}"
         i=$((i + 1))
         sleep 0.1
     done
     wait "$pid"
     rc=$?
-    printf '\e[J'
-    if [ "$rc" -eq 0 ]; then
-        phi_ok "$label"
-    else
-        printf '  %s✗%s %s %s(exit %d, log: %s)%s\n' "$PHI_RED" "$PHI_RESET" "$label" "$PHI_DIM" "$rc" "$log" "$PHI_RESET"
+    trap 'tui_leave; exit 130' INT TERM
+    tui_live_clear
+    tui_done_line "$rc" "$label" "$log" $((SECONDS - start))
+    return "$rc"
+}
+
+# tui_nix "label" logfile nix build ...
+# like tui_run, for a nix command that takes --log-format internal-json.
+# phi-nix-progress.awk turns nix's event stream into a readable log and a
+# state file, and this draws a real progress bar from it: bytes downloaded,
+# paths copied, derivations built, what's building now, and an eta
+tui_nix() {
+    local label=$1 log=$2 pid rc start el i=0 state rcf permille eta pct
+    shift 2
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) st=()
+    if [ -n "${PHI_DRY:-}" ]; then
+        printf '  %s$%s %s\n' "$PHI_BRONZE" "$PHI_RESET" "$*" | tee -a "$log"
+        return 0
     fi
+    state=$(mktemp) rcf=$(mktemp)
+    (
+        "$@" --log-format internal-json 2>&1 >/dev/null </dev/null |
+            LC_ALL=C gawk -v logf="$log" -v state="$state" -f "$PHI_PROGRESS_AWK"
+        echo "${PIPESTATUS[0]}" >"$rcf"
+    ) &
+    pid=$!
+    start=$SECONDS
+    # ctrl-c takes nix down with it instead of leaving it running behind the shell
+    trap 'pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; tui_leave; exit 130' INT TERM
+    while kill -0 "$pid" 2>/dev/null; do
+        el=$((SECONDS - start))
+        mapfile -t st <"$state" 2>/dev/null
+        permille=${st[0]:-0}
+        [[ "$permille" =~ ^[0-9]+$ ]] || permille=0
+        pct=$(printf '%d.%d%%' $((permille / 10)) $((permille % 10)))
+        eta=""
+        # an eta only once there's enough of a run to say something
+        if [ "$permille" -ge 20 ] && [ "$permille" -lt 1000 ] && [ "$el" -ge 30 ]; then
+            eta="  ${PHI_DIM}~$(tui_clock $((el * (1000 - permille) / permille))) left$PHI_RESET"
+        fi
+        tui_live "$PHI_AMBER${frames[i % 10]}$PHI_RESET $label  $PHI_DIM$(tui_clock "$el")$PHI_RESET" \
+            "$(phi_bar "$permille" 1000 34)  $PHI_BOLD$pct$PHI_RESET$eta" \
+            "${st[1]:-starting nix}" "${st[2]:-}" "${st[@]:3}"
+        i=$((i + 1))
+        sleep 0.1
+    done
+    wait "$pid"
+    rc=$(cat "$rcf" 2>/dev/null)
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+    rm -f "$state" "$rcf"
+    trap 'tui_leave; exit 130' INT TERM
+    tui_live_clear
+    tui_done_line "$rc" "$label" "$log" $((SECONDS - start))
     return "$rc"
 }
