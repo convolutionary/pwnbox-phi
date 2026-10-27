@@ -36,10 +36,7 @@ let
         homeDir
         mainMonitorLine
         leftMonitorLine
-        (if pwnboxTimezone != "" then
-          "env = TZ,${pwnboxTimezone}\nenv = TZDIR,/etc/zoneinfo"
-        else
-          "")
+        (if pwnboxTimezone != "" then "env = TZ,${pwnboxTimezone}\nenv = TZDIR,/etc/zoneinfo" else "")
         vdesktopsLine
       ]
       (builtins.readFile "${dotfiles}/config/hypr/hyprland.conf");
