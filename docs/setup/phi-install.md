@@ -131,6 +131,9 @@ ticked. It writes `hosts/<hostname>/gpu.nix` with:
   `nvidia-offload <program>`. Bus IDs are read from `lspci` at install time
 - every NVIDIA module loaded at boot, because the hardening locks module
   loading afterwards and `nvidia_uvm` would otherwise miss its chance
+- the LTS kernel instead of the newest one. The driver builds out of tree
+  and lags new kernels: 595.71 fails on 7.2 (`strncpy` is gone). The LTS
+  kernel still supports RTX 50 and Zen 5. Without NVIDIA you get the newest
 
 On a laptop (anything with a battery) the extras list offers **adaptive
 power**, ticked: performance governor and turbo on the charger, powersave

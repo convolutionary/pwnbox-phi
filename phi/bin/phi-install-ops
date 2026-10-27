@@ -444,9 +444,16 @@ ops_host_nix() {
     };
   };
 
-  boot.kernelPackages = pkgs.linuxPackages_latest;
+  boot.kernelPackages = pkgs.$(ops_kernel);
 }
 EOF
+}
+
+# newest kernel, except with the nvidia driver: it builds out of tree and
+# lags new kernels. 595.71 doesn't build on 7.2 (strncpy is gone), so nvidia
+# machines get the lts kernel, which still knows rtx 50 and zen 5
+ops_kernel() {
+    if [ "$(has nvidia)" = true ]; then echo linuxPackages; else echo linuxPackages_latest; fi
 }
 
 ops_boot_nix() {
