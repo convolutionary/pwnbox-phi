@@ -35,6 +35,7 @@ as `#1a1b26` are fine).
 | `background` | Window/terminal background. |
 | `foreground` | Main text colour. |
 | `cursor` | Text cursor. Defaults to `foreground`. |
+| `border` | Focused-window border, also rofi's and kitty's. Defaults to a quiet shade of `background`. |
 | `color0` … `color15` | The 16-colour terminal palette. |
 
 Any colour you leave out falls back to the monochrome palette, so a minimal

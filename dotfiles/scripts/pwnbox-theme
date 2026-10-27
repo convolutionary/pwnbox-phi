@@ -2950,12 +2950,21 @@ lighten_hex() {
 }
 
 apply_borders() {
-    local bg brdr hypr rofi kitty zed
+    local bg brdr active cur cdir cb hypr rofi kitty zed
     bg="$(sed -nE 's/^var bg[[:space:]]*=[[:space:]]*"#?([0-9a-fA-F]{6})".*/\1/p' \
         "$HOME/.config/quickshell/Theme.js" 2>/dev/null | head -1)"
     [ -n "$bg" ] || bg="080808"
     brdr="$(lighten_hex "#$bg" "${border_lighten:-12}")"
     brdr="${brdr#\#}"
+    # a custom theme can name its focused-window border (phi: gold). inactive
+    # windows keep the quiet one derived from the background
+    active="$brdr"
+    cur="$(read_state "$custom_state" "")"
+    if [ -n "$cur" ] && cdir="$(theme_dir_of "$cur")"; then
+        cb="$(conf_get "$cdir/theme.conf" border)"
+        cb="${cb#\#}"
+        [[ "$cb" =~ ^[0-9a-fA-F]{6}$ ]] && active="$cb"
+    fi
 
     hypr="$cache/hyprland.conf"
     if [ -f "$hypr" ]; then
@@ -2966,7 +2975,7 @@ apply_borders() {
                 printf '# pwnbox-borders-start\n'
                 printf 'general {\n'
                 printf '    border_size = %s\n' "$(border_hypr)"
-                printf '    col.active_border = rgba(%sff)\n' "$brdr"
+                printf '    col.active_border = rgba(%sff)\n' "$active"
                 printf '    col.inactive_border = rgba(%sff)\n' "$brdr"
                 printf '}\n'
                 printf 'windowrule = border_color rgba(%sff) rgba(%sff), match:class ^(spotify)$\n' "$brdr" "$brdr"
@@ -2997,12 +3006,12 @@ apply_borders() {
     fi
 
     rofi="$cache/rofi.rasi"
-    [ -f "$rofi" ] && sed -i -E "s/^([[:space:]]*brdr:[[:space:]]*).*/\1#${brdr};/" "$rofi" 2>/dev/null || true
+    [ -f "$rofi" ] && sed -i -E "s/^([[:space:]]*brdr:[[:space:]]*).*/\1#${active};/" "$rofi" 2>/dev/null || true
 
     kitty="$cache/kitty.conf"
     if [ -f "$kitty" ]; then
         sed -i -E \
-            -e "s/^(active_border_color[[:space:]]+).*/\1#${brdr}/" \
+            -e "s/^(active_border_color[[:space:]]+).*/\1#${active}/" \
             -e "s/^(inactive_border_color[[:space:]]+).*/\1#${brdr}/" \
             -e "s/^(inactive_tab_background[[:space:]]+).*/\1#${bg}/" \
             "$kitty" 2>/dev/null || true
@@ -3371,6 +3380,8 @@ do_custom() {
     fi
 
     install_palette
+    # apply_borders reads the current theme's border key, so record it first
+    printf '%s\n' "$(basename "$dir")" >"$custom_state"
     apply_borders
     spawn_nice build_mono_icons
 
@@ -3441,6 +3452,7 @@ monochrome() {
     fi
     seed_monochrome
     sync_zed "$mono/pwnbox.json"
+    rm -f "$custom_state"
     apply_borders
     spawn_nice build_mono_icons
     set_wallpaper "$default_wall"
@@ -3466,10 +3478,10 @@ apply() {
         return 1
     fi
     install_palette
+    rm -f "$custom_state"
     apply_borders
     spawn_nice build_mono_icons
     printf '%s\n' "$img" >"$state"
-    rm -f "$custom_state"
     set_wallpaper "$img"
     reload_apps
     notify "Theme" "$(basename "$img")"

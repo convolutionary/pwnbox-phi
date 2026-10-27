@@ -180,18 +180,16 @@ die() {
 }
 
 banner() {
-    cat <<'EOF'
-                                                ____         ______
-|`````````, `.               .' |..          | |    ~.     .~      ~.   ``..      ..''
-|'''''''''    `.           .'   |  ``..      | |____.'_   |          |      ``..''
-|               `.   .   .'     |      ``..  | |       ~. |          |      ..'`
-|                 `.' `.'       |          ``| |_______.'  `.______.'   ..''      ``..
-EOF
+    # the phi mark: golden spiral with the name beside it, same as phi-install
     if [ -f "$FLAKE_DIR/phi/bin/phi-mark" ]; then
         # shellcheck source=../phi/bin/phi-mark
         . "$FLAKE_DIR/phi/bin/phi-mark"
-        phi_rule 87
-        printf '%58s%s%s%s\n' '' "$PHI_AMBER" 'φ  phi edition  ·  1.6180339887…' "$PHI_RESET"
+        phi_banner "building the isos"
+    else
+        printf '
+  φ  pwnbox·phi
+
+'
     fi
 }
 
@@ -204,9 +202,7 @@ run() {
 }
 
 help_screen() {
-    printf '%s\n' "$C_BLUE$C_BOLD"
     banner
-    printf '%s\n' "$C_RESET"
     usage_text
 }
 
@@ -228,9 +224,7 @@ if [ "$had_args" -eq 0 ] && [ -t 0 ]; then
         ;;
     esac
 elif [ -t 1 ]; then
-    printf '%s\n' "$C_BLUE$C_BOLD"
     banner
-    printf '%s\n' "$C_RESET"
 fi
 
 [ ${#images[@]} -gt 0 ] || images=(live installer)
